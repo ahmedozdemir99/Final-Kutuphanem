@@ -108,6 +108,7 @@ export const ReaderModal: React.FC<ReaderModalProps> = ({
   });
   const [isPlayingVoice, setIsPlayingVoice] = useState<boolean>(false);
   const [showVoiceMenu, setShowVoiceMenu] = useState<boolean>(false);
+  const [currentPageText, setCurrentPageText] = useState<string>('');
 
   const activeVoicePreset = VOICE_PRESETS.find(p => p.id === selectedVoiceId) || VOICE_PRESETS[0];
 
@@ -132,13 +133,40 @@ export const ReaderModal: React.FC<ReaderModalProps> = ({
     }
 
     let textToRead = '';
+    
+    // Priority 1: Highlighted / selected text by user
     if (selectedText.trim()) {
       textToRead = selectedText.trim();
-    } else {
-      textToRead = `${activeBook.title}. Yazar: ${activeBook.author}. ${currentPage}. Sayfa. ${
-        activeBook.description || 'İlim ve hakikat yolculuğu, zihnin derinliklerinde başlayan sessiz bir tefekkür ile tecellî eder. Her sahife, hakikate açılan mütevazı bir kapı ve insan ruhunu zenginleştiren kutlu bir adımdır.'
-      }`;
+    } else if (currentPageText.trim()) {
+      textToRead = currentPageText.trim();
+    } else if (activeBook.fileStorageUrl && activeBook.fileType === 'pdf') {
+      try {
+        const pdfjs = await import('pdfjs-dist');
+        const loadingTask = pdfjs.getDocument({ url: activeBook.fileStorageUrl });
+        const pdf = await loadingTask.promise;
+        const page = await pdf.getPage(currentPage);
+        const textContent = await page.getTextContent();
+        const extracted = textContent.items.map((item: any) => item.str).join(' ').replace(/\s+/g, ' ').trim();
+        if (extracted && extracted.length > 5) {
+          textToRead = extracted;
+          setCurrentPageText(extracted);
+        }
+      } catch (e) {
+        console.warn("PDF on-demand text extraction notice:", e);
+      }
     }
+
+    if (!textToRead.trim()) {
+      const pageEl = document.getElementById('digital-reader-page-content');
+      const domText = pageEl?.innerText?.trim();
+      if (domText && domText.length > 20) {
+        textToRead = domText;
+      } else {
+        textToRead = `${activeBook.title}. Yazar: ${activeBook.author}. Sayfa ${currentPage}. ${activeBook.description || ''}`;
+      }
+    }
+
+    if (!textToRead.trim()) return;
 
     try {
       setIsPlayingVoice(true);
@@ -199,6 +227,7 @@ export const ReaderModal: React.FC<ReaderModalProps> = ({
 
   // Sync page change back to parent and storage instantly
   useEffect(() => {
+    setCurrentPageText('');
     try {
       localStorage.setItem(`dk_last_page_${activeBook.id}`, String(currentPage));
     } catch {}
@@ -902,6 +931,7 @@ export const ReaderModal: React.FC<ReaderModalProps> = ({
                 onDoubleClick={handleReaderDoubleClick}
                 isFullScreenMode={isFullscreen || isZenMode}
                 onToggleFullScreen={toggleFullscreenReadingMode}
+                onTextExtracted={(extractedStr) => setCurrentPageText(extractedStr)}
                 onTotalPagesLoaded={(total) => {
                   if (total && total !== totalPages) {
                     setTotalPages(total);
@@ -951,7 +981,7 @@ export const ReaderModal: React.FC<ReaderModalProps> = ({
                 </div>
 
                 {/* Book Body Text Content */}
-                <div className="flex-1 text-justify font-sans tracking-normal space-y-4 leading-relaxed">
+                <div id="digital-reader-page-content" className="flex-1 text-justify font-sans tracking-normal space-y-4 leading-relaxed">
                   <h2 className="font-serif-title font-bold text-2xl md:text-3xl text-center mb-6 text-[#742C3C] dark:text-[#B79A63]">
                     {currentPage === 1 ? activeBook.title : `Bölüm ${Math.ceil(currentPage / 25)}: Hikmet ve Tefekkür`}
                   </h2>

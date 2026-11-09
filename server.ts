@@ -186,7 +186,7 @@ async function startServer() {
 
       const currentAi = getGenAI();
       const response = await currentAi.models.generateContent({
-        model: 'gemini-3.8-flash-lite-tts',
+        model: 'gemini-2.5-flash',
         contents: [
           {
             role: 'user',

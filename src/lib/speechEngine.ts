@@ -206,7 +206,13 @@ export async function speakVoiceText(
   const cleanText = text.trim();
   if (!cleanText) return;
 
-  // 1. Nöral TTS (Varsa veya önbellekteyse stüdyo kalitesinde gerçek ses)
+  // For full book page texts (>280 chars), use browser speech synthesis directly so the entire multi-paragraph page is read continuously
+  if (cleanText.length > 280) {
+    fallbackToBrowserSpeech(cleanText, preset, options);
+    return;
+  }
+
+  // 1. Nöral TTS (Kısa cümleler veya önizleme için)
   try {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 2000);
@@ -274,68 +280,84 @@ function fallbackToBrowserSpeech(
 
   try {
     window.speechSynthesis.cancel();
+    window.speechSynthesis.resume();
     speechQueueCancelled = false;
 
-    // Uzun metinleri doğal cümlelere böl (Chrome 15 saniye zaman aşımını engeller)
+    // Split text into natural sentences so Chrome/Android 15s timeout never halts speech
     const rawSentences = text
-      .replace(/([.?!;:])\s+/g, '$1|')
+      .replace(/([.?!;:\n])\s+/g, '$1|')
       .split('|')
       .map(s => s.trim())
       .filter(s => s.length > 0);
 
     const sentences = rawSentences.length > 0 ? rawSentences : [text];
-    const voices = window.speechSynthesis.getVoices();
-    const voiceConfig = selectBestVoiceForPreset(voices, preset);
 
-    let currentIndex = 0;
-    let hasStarted = false;
-
-    const speakNext = () => {
+    const runSpeech = () => {
       if (speechQueueCancelled) return;
-      if (currentIndex >= sentences.length) {
-        options?.onEnd?.();
-        return;
-      }
+      const voices = window.speechSynthesis.getVoices();
+      const voiceConfig = selectBestVoiceForPreset(voices, preset);
 
-      const sentenceText = sentences[currentIndex];
-      const utterance = new SpeechSynthesisUtterance(sentenceText);
-      activeUtterances = [utterance];
+      let currentIndex = 0;
+      let hasStarted = false;
 
-      if (voiceConfig.voice) {
-        utterance.voice = voiceConfig.voice;
-      }
-      utterance.lang = 'tr-TR';
-      utterance.rate = voiceConfig.rate;
-      utterance.pitch = voiceConfig.pitch;
-
-      utterance.onstart = () => {
-        if (!hasStarted) {
-          hasStarted = true;
-          options?.onStart?.();
+      const speakNext = () => {
+        if (speechQueueCancelled) return;
+        if (currentIndex >= sentences.length) {
+          options?.onEnd?.();
+          return;
         }
-      };
 
-      utterance.onend = () => {
-        currentIndex++;
-        speakNext();
-      };
+        window.speechSynthesis.resume();
 
-      utterance.onerror = (e) => {
-        // Eğer kullanıcı kendisi durdurmadıysa hatayı ilet
-        if (!speechQueueCancelled) {
-          currentIndex++;
-          if (currentIndex < sentences.length) {
-            speakNext();
-          } else {
-            options?.onEnd?.();
+        const sentenceText = sentences[currentIndex];
+        const utterance = new SpeechSynthesisUtterance(sentenceText);
+        activeUtterances = [utterance];
+
+        if (voiceConfig.voice) {
+          utterance.voice = voiceConfig.voice;
+        }
+        utterance.lang = 'tr-TR';
+        utterance.rate = voiceConfig.rate;
+        utterance.pitch = voiceConfig.pitch;
+
+        utterance.onstart = () => {
+          if (!hasStarted) {
+            hasStarted = true;
+            options?.onStart?.();
           }
-        }
+        };
+
+        utterance.onend = () => {
+          currentIndex++;
+          speakNext();
+        };
+
+        utterance.onerror = (e) => {
+          if (!speechQueueCancelled) {
+            currentIndex++;
+            if (currentIndex < sentences.length) {
+              speakNext();
+            } else {
+              options?.onEnd?.();
+            }
+          }
+        };
+
+        window.speechSynthesis.speak(utterance);
       };
 
-      window.speechSynthesis.speak(utterance);
+      speakNext();
     };
 
-    speakNext();
+    if (window.speechSynthesis.getVoices().length === 0) {
+      window.speechSynthesis.onvoiceschanged = () => {
+        window.speechSynthesis.onvoiceschanged = null;
+        runSpeech();
+      };
+      setTimeout(runSpeech, 100);
+    } else {
+      runSpeech();
+    }
 
   } catch (err) {
     options?.onError?.(err);

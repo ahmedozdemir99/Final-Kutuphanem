@@ -24,6 +24,7 @@ interface PdfViewerProps {
   onDoubleClick?: (e?: React.MouseEvent) => void;
   isFullScreenMode?: boolean;
   onToggleFullScreen?: () => void;
+  onTextExtracted?: (text: string) => void;
 }
 
 export const PdfViewer: React.FC<PdfViewerProps> = ({
@@ -37,7 +38,8 @@ export const PdfViewer: React.FC<PdfViewerProps> = ({
   onZoomChange,
   onDoubleClick,
   isFullScreenMode = false,
-  onToggleFullScreen
+  onToggleFullScreen,
+  onTextExtracted
 }) => {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -182,6 +184,7 @@ export const PdfViewer: React.FC<PdfViewerProps> = ({
           
           if (isMounted) {
             setExtractedText(pageTextStr);
+            onTextExtracted?.(pageTextStr);
           }
         } catch (textErr) {
           console.warn('Text extraction notice:', textErr);
