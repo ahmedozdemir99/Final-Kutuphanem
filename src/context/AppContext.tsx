@@ -8,6 +8,7 @@ import { auth, db, loginWithGoogle } from '../lib/firebase';
 import { saveBookFileToIDB, getBookFileFromIDB, saveCoverToIDB, getCoverFromIDB, saveAppDataToIDB, getAppDataFromIDB, deleteBookDataFromIDB } from '../lib/indexedDb';
 import { validateBackupJSON, ValidationResult } from '../lib/jsonValidator';
 import { AVAILABLE_BADGES } from '../data/badgeData';
+import { compressImageDataUrl } from '../utils/imageUtils';
 
 interface AppContextType {
   activeTab: MainTab;
@@ -186,8 +187,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           const copy = { ...b };
           delete copy.fileData;
           delete copy.fileStorageUrl;
-          // Protect localStorage quota only on extremely oversized raw base64 (>150KB)
-          if (typeof copy.coverUrl === 'string' && copy.coverUrl.startsWith('data:') && copy.coverUrl.length > 150000) {
+          // Protect localStorage quota only on extremely oversized raw base64 (>800KB)
+          if (typeof copy.coverUrl === 'string' && copy.coverUrl.startsWith('data:') && copy.coverUrl.length > 800000) {
             copy.coverUrl = ''; 
           }
           return copy;
@@ -211,7 +212,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             const copy = { ...b };
             delete copy.fileData;
             delete copy.fileStorageUrl;
-            if (typeof copy.coverUrl === 'string' && copy.coverUrl.startsWith('data:')) {
+            if (typeof copy.coverUrl === 'string' && copy.coverUrl.startsWith('data:') && copy.coverUrl.length > 800000) {
               copy.coverUrl = '';
             }
             return copy;
@@ -927,26 +928,45 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       const raw = { ...book, userId: auth.currentUser.uid };
       delete raw.fileStorageUrl;
       delete raw.fileData;
-      // Allow realistic custom cover images up to 350KB so covers are permanently stored in Firestore
-      if (typeof raw.coverUrl === 'string' && raw.coverUrl.startsWith('data:') && raw.coverUrl.length > 350000) {
-        raw.coverUrl = '';
+      // Allow realistic custom cover images up to 800KB so covers are permanently stored in Firestore
+      if (typeof raw.coverUrl === 'string' && raw.coverUrl.startsWith('data:')) {
+        if (raw.coverUrl.length > 300000) {
+          try {
+            raw.coverUrl = await compressImageDataUrl(raw.coverUrl, 500, 750, 0.7);
+          } catch {}
+        }
+        if (raw.coverUrl.length > 800000) {
+          raw.coverUrl = '';
+        }
       }
       await safeFirestoreSet(doc(db, 'userBooks', book.id), raw);
     }
   };
 
   const updateBookCover = async (bookId: string, newCoverUrl: string, source: string = 'user', confidence: number = 100) => {
+    let finalCoverUrl = newCoverUrl;
+    if (newCoverUrl && typeof newCoverUrl === 'string' && newCoverUrl.startsWith('data:image')) {
+      try {
+        finalCoverUrl = await compressImageDataUrl(newCoverUrl, 600, 900, 0.75);
+      } catch (err) {
+        console.warn('Cover compression fallback:', err);
+      }
+    }
+
+    if (finalCoverUrl && !finalCoverUrl.includes('placeholder')) {
+      saveCoverToIDB(bookId, finalCoverUrl).catch(e => console.warn(e));
+    }
+
     setUserBooks(prev => prev.map(b => {
       if (b.id === bookId) {
         const updated: UserBook = {
           ...b,
-          coverUrl: newCoverUrl,
+          coverUrl: finalCoverUrl,
           coverSource: source as any,
           coverMatchScore: confidence,
           updatedAt: new Date().toISOString()
         };
         saveBookToFirestore(updated);
-        saveCoverToIDB(bookId, newCoverUrl).catch(e => console.warn(e));
         return updated;
       }
       return b;
@@ -1189,10 +1209,16 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         winner.currentPage = Math.max(winner.currentPage || 0, loser.currentPage || 0);
         winner.totalPages = Math.max(winner.totalPages || 0, loser.totalPages || 0, winner.currentPage);
 
+        // Respect status derived from latest updatedAt timestamp or explicit page completion
+        const winnerTime = new Date(winner.updatedAt || 0).getTime();
+        const loserTime = new Date(loser.updatedAt || 0).getTime();
+        if (loserTime > winnerTime && loser.status) {
+          winner.status = loser.status;
+          winner.updatedAt = loser.updatedAt;
+        }
+
         if (winner.currentPage >= winner.totalPages && winner.totalPages > 0) {
           winner.status = 'completed';
-        } else if (winner.currentPage > 0 || winner.status === 'reading' || loser.status === 'reading') {
-          winner.status = 'reading';
         }
 
         if (!winner.coverUrl || winner.coverUrl.includes('placeholder') || winner.coverUrl.trim() === '') {
@@ -1297,8 +1323,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           if (loser.userNotes && !winner.userNotes?.includes(loser.userNotes)) {
             winner.userNotes = winner.userNotes ? `${winner.userNotes}\n${loser.userNotes}` : loser.userNotes;
           }
-          if (loser.status === 'completed' || (loser.status === 'reading' && winner.status === 'want_to_read')) {
+          const winnerTime = new Date(winner.updatedAt || 0).getTime();
+          const loserTime = new Date(loser.updatedAt || 0).getTime();
+          if (loserTime > winnerTime && loser.status) {
             winner.status = loser.status;
+            winner.updatedAt = loser.updatedAt;
+          }
+          if (winner.currentPage >= winner.totalPages && winner.totalPages > 0) {
+            winner.status = 'completed';
           }
           if (loser.userRating && !winner.userRating) {
             winner.userRating = loser.userRating;
@@ -1713,12 +1745,19 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       const cleanBooks = mergeAndDeduplicateBooksList(userBooks);
       setUserBooks(cleanBooks);
 
-      cleanBooks.forEach(book => {
+      cleanBooks.forEach(async (book) => {
         const raw = { ...book, userId: uid };
         delete raw.fileData;
         delete raw.fileStorageUrl;
-        if (typeof raw.coverUrl === 'string' && raw.coverUrl.startsWith('data:') && raw.coverUrl.length > 350000) {
-          raw.coverUrl = '';
+        if (typeof raw.coverUrl === 'string' && raw.coverUrl.startsWith('data:')) {
+          if (raw.coverUrl.length > 300000) {
+            try {
+              raw.coverUrl = await compressImageDataUrl(raw.coverUrl, 500, 750, 0.7);
+            } catch {}
+          }
+          if (raw.coverUrl.length > 800000) {
+            raw.coverUrl = '';
+          }
         }
         const clean = cleanForFirestore(raw);
         batch.set(doc(db, 'userBooks', book.id), clean);

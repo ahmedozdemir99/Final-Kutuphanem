@@ -38,6 +38,10 @@ export const BookCoverImage: React.FC<BookCoverImageProps> = ({
 }) => {
   const [hasError, setHasError] = useState(false);
 
+  React.useEffect(() => {
+    setHasError(false);
+  }, [src]);
+
   const colors = CATEGORY_COLORS[category] || CATEGORY_COLORS["Edebiyat"];
 
   const coverContent = (!src || hasError) ? (
