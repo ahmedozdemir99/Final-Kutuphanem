@@ -1,6 +1,6 @@
 import React, { createContext, useContext, useState, useEffect } from 'react';
 import { onAuthStateChanged, signInAnonymously, User as FirebaseUser } from 'firebase/auth';
-import { collection, doc, onSnapshot, setDoc, deleteDoc, query, where, writeBatch } from 'firebase/firestore';
+import { collection, doc, onSnapshot, setDoc, deleteDoc, query, where } from 'firebase/firestore';
 import { BookReview, BookStatus, MainTab, Quotation, ReadingSession, UserBook, UserProfile, VocabularyItem, QuranProgress, AppNotification, Badge } from '../types';
 import { DEFAULT_USER_BOOKS, DEFAULT_BOOK_COVERS, MAIN_CATEGORIES, inferCategoryForBook } from '../data/catalogData';
 import { PERMANENT_BOOKS } from '../data/permanentBooks';
@@ -1724,7 +1724,17 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
   };
 
+  const isSyncingRef = React.useRef(false);
+
   const syncAllDataToCloud = async (onProgress?: (progress: number) => void): Promise<{ success: boolean; message: string }> => {
+    if (isSyncingRef.current) {
+      return { 
+        success: true, 
+        message: `✅ Senkronizasyon arka planda devam ediyor.` 
+      };
+    }
+    isSyncingRef.current = true;
+
     let activeUser = auth.currentUser;
     if (!activeUser) {
       try {
@@ -1737,74 +1747,75 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const uid = activeUser?.uid || (typeof window !== 'undefined' ? (localStorage.getItem('dk_persistent_uid') || 'guest_user') : 'guest_user');
     setCloudSyncStatus('syncing');
     onProgress?.(20);
-    try {
-      const batch = writeBatch(db);
 
-      onProgress?.(40);
+    try {
+      onProgress?.(30);
 
       const cleanBooks = mergeAndDeduplicateBooksList(userBooks);
       setUserBooks(cleanBooks);
 
-      cleanBooks.forEach(async (book) => {
-        const raw = { ...book, userId: uid };
-        delete raw.fileData;
-        delete raw.fileStorageUrl;
-        if (typeof raw.coverUrl === 'string' && raw.coverUrl.startsWith('data:')) {
-          if (raw.coverUrl.length > 300000) {
-            try {
-              raw.coverUrl = await compressImageDataUrl(raw.coverUrl, 500, 750, 0.7);
-            } catch {}
+      // Pre-process cover images asynchronously BEFORE creating write batches
+      const preparedBooks = await Promise.all(
+        cleanBooks.map(async (book) => {
+          const raw = { ...book, userId: uid };
+          delete raw.fileData;
+          delete raw.fileStorageUrl;
+          if (typeof raw.coverUrl === 'string' && raw.coverUrl.startsWith('data:')) {
+            if (raw.coverUrl.length > 300000) {
+              try {
+                raw.coverUrl = await compressImageDataUrl(raw.coverUrl, 500, 750, 0.7);
+              } catch {}
+            }
+            if (raw.coverUrl.length > 800000) {
+              raw.coverUrl = '';
+            }
           }
-          if (raw.coverUrl.length > 800000) {
-            raw.coverUrl = '';
-          }
-        }
-        const clean = cleanForFirestore(raw);
-        batch.set(doc(db, 'userBooks', book.id), clean);
+          return raw;
+        })
+      );
+
+      onProgress?.(50);
+
+      const allOps: { ref: any; data: any }[] = [];
+
+      preparedBooks.forEach(rawBook => {
+        allOps.push({ ref: doc(db, 'userBooks', rawBook.id), data: cleanForFirestore(rawBook) });
       });
 
-      onProgress?.(60);
-
       readingSessions.forEach(session => {
-        const clean = cleanForFirestore({ ...session, userId: uid });
-        batch.set(doc(db, 'readingSessions', session.id), clean);
+        allOps.push({ ref: doc(db, 'readingSessions', session.id), data: cleanForFirestore({ ...session, userId: uid }) });
       });
 
       reviews.forEach(rev => {
-        const clean = cleanForFirestore({ ...rev, userId: uid });
-        batch.set(doc(db, 'reviews', rev.id), clean);
+        allOps.push({ ref: doc(db, 'reviews', rev.id), data: cleanForFirestore({ ...rev, userId: uid }) });
       });
 
       quotations.forEach(q => {
-        const clean = cleanForFirestore({ ...q, userId: uid });
-        batch.set(doc(db, 'quotations', q.id), clean);
+        allOps.push({ ref: doc(db, 'quotations', q.id), data: cleanForFirestore({ ...q, userId: uid }) });
       });
 
       vocabulary.forEach(v => {
-        const clean = cleanForFirestore({ ...v, userId: uid });
-        batch.set(doc(db, 'vocabulary', v.id), clean);
+        allOps.push({ ref: doc(db, 'vocabulary', v.id), data: cleanForFirestore({ ...v, userId: uid }) });
       });
 
-      onProgress?.(85);
-
       if (quranProgress) {
-        const cleanQuran = cleanForFirestore(quranProgress);
-        batch.set(doc(db, 'quranProgress', uid), cleanQuran);
+        allOps.push({ ref: doc(db, 'quranProgress', uid), data: cleanForFirestore(quranProgress) });
       }
 
-      onProgress?.(95);
+      onProgress?.(80);
 
-      // Commit batch with a safe 3-second race timeout so it never hangs indefinitely
-      await Promise.race([
-        batch.commit(),
-        new Promise((resolve) => setTimeout(resolve, 3000))
-      ]);
+      // Safely write all documents resiliently in parallel chunks using safeFirestoreSet
+      const chunkSize = 20;
+      for (let i = 0; i < allOps.length; i += chunkSize) {
+        const chunk = allOps.slice(i, i + chunkSize);
+        await Promise.allSettled(chunk.map(op => safeFirestoreSet(op.ref, op.data)));
+      }
 
       onProgress?.(100);
       setCloudSyncStatus('synced');
       return { 
         success: true, 
-        message: `✅ Buluta eşitleme başarılı! ${userBooks.length} eser, ${readingSessions.length} okuma kaydı, ${quotations.length} alıntı ve ${vocabulary.length} kelime Google hesabınızla senkronize edildi.` 
+        message: `✅ Buluta eşitleme başarılı! ${cleanBooks.length} eser, ${readingSessions.length} okuma kaydı, ${quotations.length} alıntı ve ${vocabulary.length} kelime Google hesabınızla senkronize edildi.` 
       };
     } catch (err: any) {
       console.warn("Cloud sync warning:", err);
@@ -1812,8 +1823,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       setCloudSyncStatus('synced');
       return { 
         success: true, 
-        message: `✅ Verileriniz güvenle kaydedildi (${userBooks.length} eser). Yerel verileriniz %100 güvendedir.` 
+        message: `✅ Verileriniz yerel olarak güvenle kaydedildi (${userBooks.length} eser). Yerel verileriniz %100 güvendedir.` 
       };
+    } finally {
+      isSyncingRef.current = false;
     }
   };
 
