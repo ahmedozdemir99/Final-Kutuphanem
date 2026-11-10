@@ -372,7 +372,7 @@ export const ChatView: React.FC = () => {
       ];
       setLastRagSources(activeSources);
 
-      const history = messages.map(m => ({
+      const history = [...messages, userMsg].map(m => ({
         role: m.role,
         parts: [{ text: m.text }]
       }));

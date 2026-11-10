@@ -524,7 +524,8 @@ ${ragContextText}
               model: m,
               contents: contents,
               config: {
-                systemInstruction
+                systemInstruction,
+                temperature: 0.8
               }
             });
             if (response && response.text) {
