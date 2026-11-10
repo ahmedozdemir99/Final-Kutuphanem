@@ -16,11 +16,9 @@ export interface RAGSearchInput {
 export interface RAGSearchResult {
   summary: {
     totalBooks: number;
-    completedBooks: number;
-    readingBooks: number;
     totalQuotesCount: number;
     totalSessionsCount: number;
-    activeBooksInfo: string[];
+    categoryStats: Record<string, number>;
   };
   retrievedBooks: string[];
   retrievedQuotes: string[];
@@ -101,14 +99,8 @@ export function buildVectorRAGContext(input: RAGSearchInput): RAGSearchResult {
 
   const summary = {
     totalBooks: userBooks.length,
-    completedBooks: completedBooks.length,
-    readingBooks: readingBooks.length,
-    wantToReadBooks: wantToReadBooks.length,
     totalQuotesCount: quotations.length,
     totalSessionsCount: readingSessions.length,
-    activeBooksInfo,
-    completedBooksInfo,
-    wantToReadInfo,
     categoryStats
   };
 
@@ -185,27 +177,27 @@ export function buildVectorRAGContext(input: RAGSearchInput): RAGSearchResult {
   const matchingPoetry = queryTokens.length > 0 ? poetryItems.filter(item => item.score >= 0.25) : [];
   const matchingVocab = queryTokens.length > 0 ? scoredVocab.filter(item => item.score >= 0.25) : [];
 
-  const topBooks = matchingBooks.slice(0, 5).map(item => 
-    `• [${item.book.status.toUpperCase()}] "${item.book.title}" (${item.book.author}) - Kategori: ${item.book.category}, İlerleme: Sayfa ${item.book.currentPage}/${item.book.totalPages}${item.book.userNotes ? `, Not: "${item.book.userNotes}"` : ''}`
+  const topBooks = matchingBooks.slice(0, 15).map(item => 
+    `• "${item.book.title}" (${item.book.author}) - Kategori: ${item.book.category}${item.book.userNotes ? `, Not: "${item.book.userNotes}"` : ''}`
   );
 
-  const topQuotes = matchingQuotes.slice(0, 4).map(item => 
+  const topQuotes = matchingQuotes.slice(0, 10).map(item => 
     `• "${item.quote.quoteText}" (${item.quote.bookTitle} - ${item.quote.author}${item.quote.pageNumber ? `, syf. ${item.quote.pageNumber}` : ''})${item.quote.userNote ? ` | Not: "${item.quote.userNote}"` : ''}`
   );
 
-  const topReviews = matchingReviews.slice(0, 2).map(item => 
+  const topReviews = matchingReviews.slice(0, 8).map(item => 
     `• "${item.review.bookTitle}" İncelemesi (${item.review.rating}/5 yıldız): "${item.review.content}"`
   );
 
-  const topCurriculum = matchingCurriculum.slice(0, 4).map(item => 
+  const topCurriculum = matchingCurriculum.slice(0, 8).map(item => 
     `• ${item.yearNum}. Yıl ${item.monthNum}. Ay Müfredatı: "${item.bookTitle}" (${item.author}) - ${item.category} [${item.description}]`
   );
 
-  const topPoetry = matchingPoetry.slice(0, 3).map(item => 
+  const topPoetry = matchingPoetry.slice(0, 6).map(item => 
     `• ${item.poetName} - "${item.poemTitle}": "${item.contentSnippet.replace(/\n/g, ' ')}..."`
   );
 
-  const topVocab = matchingVocab.slice(0, 3).map(item => 
+  const topVocab = matchingVocab.slice(0, 6).map(item => 
     `• ${item.vocab.word}: ${item.vocab.meaning}${item.vocab.exampleSentence ? ` (Örnek: ${item.vocab.exampleSentence})` : ''}`
   );
 
@@ -215,25 +207,21 @@ export function buildVectorRAGContext(input: RAGSearchInput): RAGSearchResult {
 
   // Construct Dense RAG Prompt Context
   const densePromptContext = `
-=== OKUR PROFİLİ VE RAG VEKTÖR ARAMA ÖZETİ ===
+=== KÜTÜPHANE VE TEFEKKÜR ARŞİVİ ARAMA ÖZETİ ===
 Okur Adı: ${displayName}
-Günlük Hedef: ${dailyTargetPages} sayfa
-Toplam Kütüphane: ${userBooks.length} eser | Okunmuş: ${completedBooks.length} | Halen Okunan: ${readingBooks.length} | Okunacak: ${wantToReadBooks.length}
-12 Kategori Dağılımı: ${categoryBreakdownText || 'Henüz kategori verisi yok'}
-Şu An Okunan Eserler: ${activeBooksInfo.length > 0 ? activeBooksInfo.join('; ') : 'Henüz aktif kitap seçilmedi'}
-Tamamlanan Eserlerden Bazıları: ${completedBooksInfo.length > 0 ? completedBooksInfo.join('; ') : 'Henüz tamamlanan eser yok'}
-Okuma Listesindeki Eserler (Okunacak): ${wantToReadInfo.length > 0 ? wantToReadInfo.join('; ') : 'Henüz okunacak listesi boş'}
+Toplam Kütüphane Arşivi: ${userBooks.length} eser
+Kategori Dağılımı: ${categoryBreakdownText || 'Henüz kategori verisi yok'}
 
---- SORGURUYLA EN İLGİLİ KÜTÜPHANE ESERLERİ ---
+--- SORGURUYLA İLGİLİ KÜTÜPHANE ESERLERİ ---
 ${topBooks.length > 0 ? topBooks.join('\n') : 'İlgili eser bulunamadı.'}
 
---- EN İLGİLİ ALINTI VE NOTLARINIZ ---
+--- İLGİLİ ALINTI VE TEFEKKÜR NOTLARINIZ ---
 ${topQuotes.length > 0 ? topQuotes.join('\n') : 'İlgili alıntı bulunamadı.'}
 
---- EN İLGİLİ İNCELEME VE YORUMLAR ---
+--- İLGİLİ İNCELEME VE YORUMLAR ---
 ${topReviews.length > 0 ? topReviews.join('\n') : 'İlgili inceleme bulunamadı.'}
 
---- 40 YILLIK İLİM MÜFREDATINDAN EN İLGİLİ ESERLER ---
+--- 40 YILLIK İLİM MÜFREDATINDAN ESERLER ---
 ${topCurriculum.length > 0 ? topCurriculum.join('\n') : 'İlgili müfredat adımı bulunamadı.'}
 
 --- İLGİLİ ŞİİR VE ŞAİR ARŞİVİ ---

@@ -4,6 +4,8 @@ import {
   Mic, MicOff, Volume2, VolumeX, Square, Radio, Play, Headphones, AlertCircle, RefreshCw, ExternalLink,
   Sliders, Check
 } from 'lucide-react';
+import { collection, query, where, orderBy, getDocs, addDoc } from 'firebase/firestore';
+import { db, auth } from '../lib/firebase';
 import { useApp } from '../context/AppContext';
 import { FULL_FOUR_YEAR_CURRICULUM } from '../data/catalogData';
 import { getFull256PoetryCollection } from '../data/poetryData';
@@ -59,15 +61,36 @@ export const ChatView: React.FC = () => {
   const { userBooks, readingSessions, quotations, userProfile, reviews, vocabulary } = useApp();
   const fullPoetryCollection = useMemo(() => getFull256PoetryCollection(), []);
 
-  const [messages, setMessages] = useState<Message[]>([
-    {
-      role: 'model',
-      text: `Selâmün Aleyküm, ${userProfile.displayName}! 🐿️ Ben senin bilge sincap koçun ve ilim arkadaşın **Robi**'yim! Kütüphanendeki 12 ana kategoriye, tamamlanan ve okunacak eserlerine, 256 şiir arşivimize ve 40 yıllık ilim müfredatımıza tam vukufiyetle hakimim. İster klavyeyle yaz, ister mikrofonuna dokunarak benimle sesli hasbihal et; sana anında ve sesli olarak mukabele edebilirim. Bugün hangi hikmetli konuyu ele alalım?`
-    }
-  ]);
-  const [inputMessage, setInputMessage] = useState<string>('');
-  const [isLoading, setIsLoading] = useState<boolean>(false);
-  const [showRagDetails, setShowRagDetails] = useState<boolean>(false);
+  const [messages, setMessages] = useState<Message[]>([{
+    role: 'model',
+    text: `Selâmün Aleyküm! 🐿️ Ben senin bilge sincap koçun ve ilim arkadaşın **Robi**'yim! Kütüphanendeki 12 ana kategoriye, tamamlanan ve okunacak eserlerine, 256 şiir arşivimize ve 40 yıllık ilim müfredatımıza tam vukufiyetle hakimim. Bugün hangi hikmetli konuyu ele alalım?`
+  }]);
+
+  // Load chat history on mount from LocalStorage, fallback to Firestore only if LocalStorage is empty
+  useEffect(() => {
+    const loadHistory = async () => {
+      if (!auth.currentUser) return;
+      
+      const cachedHistory = localStorage.getItem(`chat_history_${auth.currentUser.uid}`);
+      if (cachedHistory) {
+        setMessages(JSON.parse(cachedHistory));
+        return;
+      }
+
+      const q = query(
+        collection(db, 'chatMessages'),
+        where('userId', '==', auth.currentUser.uid),
+        orderBy('createdAt', 'asc')
+      );
+      const snapshot = await getDocs(q);
+      const hist = snapshot.docs.map(doc => doc.data() as Message);
+      if (hist.length > 0) {
+        setMessages(hist);
+        localStorage.setItem(`chat_history_${auth.currentUser.uid}`, JSON.stringify(hist));
+      }
+    };
+    loadHistory();
+  }, [userProfile.displayName]);
   const [lastRagSources, setLastRagSources] = useState<string[]>([]);
   
   // Sesli Sohbet, Estetik Ses Tonu ve Karşılıklı Konuşma Durumları
@@ -410,6 +433,16 @@ export const ChatView: React.FC = () => {
       };
       
       setMessages(prev => [...prev, modelMsg]);
+
+      // Save user and model messages to Firestore
+      if (auth.currentUser) {
+        await addDoc(collection(db, 'chatMessages'), { ...userMsg, userId: auth.currentUser.uid, createdAt: new Date().toISOString() });
+        await addDoc(collection(db, 'chatMessages'), { ...modelMsg, userId: auth.currentUser.uid, createdAt: new Date().toISOString() });
+        
+        // Update LocalStorage cache
+        const updatedHistory = [...messages, userMsg, modelMsg];
+        localStorage.setItem(`chat_history_${auth.currentUser.uid}`, JSON.stringify(updatedHistory));
+      }
 
       // Eğer Eller Serbest Modu açıksa, Robi cevabı otomatik olarak seslendirir!
       if (voiceChatModeRef.current) {

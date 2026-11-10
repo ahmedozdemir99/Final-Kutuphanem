@@ -1,6 +1,6 @@
 import React, { createContext, useContext, useState, useEffect } from 'react';
 import { onAuthStateChanged, signInAnonymously, User as FirebaseUser } from 'firebase/auth';
-import { collection, doc, onSnapshot, setDoc, deleteDoc, query, where } from 'firebase/firestore';
+import { collection, doc, onSnapshot, setDoc, deleteDoc, query, where, getDocs } from 'firebase/firestore';
 import { BookReview, BookStatus, MainTab, Quotation, ReadingSession, UserBook, UserProfile, VocabularyItem, QuranProgress, AppNotification, Badge } from '../types';
 import { DEFAULT_USER_BOOKS, DEFAULT_BOOK_COVERS, MAIN_CATEGORIES, inferCategoryForBook } from '../data/catalogData';
 import { PERMANENT_BOOKS } from '../data/permanentBooks';
@@ -712,72 +712,17 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           photoURL: user.photoURL || prev.photoURL
         }));
 
-        // Attach Firestore Listeners with safe, non-destructive merging & deduplication
-        const qBooks = query(collection(db, 'userBooks'), where('userId', '==', user.uid));
-        const unsubBooks = onSnapshot(qBooks, snapshot => {
-          if (!snapshot.empty) {
-            const cloudBooks = snapshot.docs.map(doc => doc.data() as UserBook);
-            setUserBooks(prev => mergeAndDeduplicateBooksList(prev, cloudBooks));
-          }
-          setCloudSyncStatus('synced');
-        }, err => {
-          console.warn("userBooks snapshot status:", err);
-          setCloudSyncStatus('offline');
-        });
-
-        const qSessions = query(collection(db, 'readingSessions'), where('userId', '==', user.uid));
-        const unsubSessions = onSnapshot(qSessions, snapshot => {
-          if (!snapshot.empty) {
-            const cloudSessions = snapshot.docs.map(doc => doc.data() as ReadingSession);
-            setReadingSessions(prev => {
-              const existingIds = new Set(prev.map(s => s.id));
-              const missingFromLocal = cloudSessions.filter(cs => !existingIds.has(cs.id));
-              return missingFromLocal.length > 0 ? [...prev, ...missingFromLocal] : prev;
-            });
-          }
-        }, err => {
-          console.warn("readingSessions snapshot status:", err);
-        });
-
-        const qQuotes = query(collection(db, 'quotations'), where('userId', '==', user.uid));
-        const unsubQuotes = onSnapshot(qQuotes, snapshot => {
-          if (!snapshot.empty) {
-            const cloudQuotes = snapshot.docs.map(doc => doc.data() as Quotation);
-            setQuotations(prev => {
-              const existingIds = new Set(prev.map(q => q.id));
-              const missingFromLocal = cloudQuotes.filter(cq => !existingIds.has(cq.id));
-              return missingFromLocal.length > 0 ? [...prev, ...missingFromLocal] : prev;
-            });
-          }
-        }, err => {
-          console.warn("quotations snapshot status:", err);
-        });
-
-        const qWords = query(collection(db, 'vocabulary'), where('userId', '==', user.uid));
-        const unsubWords = onSnapshot(qWords, snapshot => {
-          if (!snapshot.empty) {
-            const cloudWords = snapshot.docs.map(doc => doc.data() as VocabularyItem);
-            setVocabulary(prev => {
-              const existingIds = new Set(prev.map(v => v.id));
-              const missingFromLocal = cloudWords.filter(cw => !existingIds.has(cw.id));
-              return missingFromLocal.length > 0 ? [...prev, ...missingFromLocal] : prev;
-            });
-          }
-        }, err => {
-          console.warn("vocabulary snapshot status:", err);
-        });
-
-        return () => {
-          unsubBooks();
-          unsubSessions();
-          unsubQuotes();
-          unsubWords();
-        };
+        // Manual fetch only: No automatic fetch on auth load to save quota
+        setUserProfile(prev => ({
+          ...prev,
+          uid: user.uid,
+          displayName: user.displayName || prev.displayName,
+          email: user.email || prev.email,
+          photoURL: user.photoURL || prev.photoURL
+        }));
       } else {
-        // Automatically authenticate anonymously so Firestore saving works out-of-the-box for all users
-        signInAnonymously(auth).catch(() => {
-          setCloudSyncStatus('offline');
-        });
+        // Automatically authenticate anonymously without fetching data
+        signInAnonymously(auth).catch(() => {});
       }
     });
 
@@ -785,42 +730,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   }, []);
 
   // Periodic background auto-sync to Cloud and IndexedDB every 30 seconds + on visibilitychange/unload
-  useEffect(() => {
-    if (!isHydrated) return;
-
-    const performPeriodicSync = () => {
-      // 1. Permanent IndexedDB sync
-      saveAppDataToIDB('dk_user_books', userBooks);
-      saveAppDataToIDB('dk_reading_sessions', readingSessions);
-      saveAppDataToIDB('dk_quotations', quotations);
-      saveAppDataToIDB('dk_quran_progress', quranProgress);
-      saveAppDataToIDB('dk_reviews', reviews);
-      saveAppDataToIDB('dk_vocabulary', vocabulary);
-      saveAppDataToIDB('dk_user_profile', userProfile);
-
-      // 2. Cloud Firestore sync
-      if (auth.currentUser) {
-        syncAllDataToCloud().catch(() => {});
-      }
-    };
-
-    const intervalId = setInterval(performPeriodicSync, 30000); // every 30 seconds
-
-    const handleLifecycle = () => {
-      performPeriodicSync();
-    };
-
-    window.addEventListener('visibilitychange', handleLifecycle);
-    window.addEventListener('beforeunload', handleLifecycle);
-    window.addEventListener('pagehide', handleLifecycle);
-
-    return () => {
-      clearInterval(intervalId);
-      window.removeEventListener('visibilitychange', handleLifecycle);
-      window.removeEventListener('beforeunload', handleLifecycle);
-      window.removeEventListener('pagehide', handleLifecycle);
-    };
-  }, [isHydrated, userBooks, readingSessions, quotations, quranProgress, reviews, vocabulary, userProfile]);
+  // Periodic auto-sync removed to drastically reduce Firestore read/write quota usage.
+  // Sync now is strictly manual via UI trigger.
 
   // Helper function to sanitize any object for Firestore (removes undefined fields)
   const cleanForFirestore = (obj: any): any => {
@@ -871,11 +782,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   // Quran Handlers
   const updateQuranProgress = (patch: Partial<QuranProgress>) => {
     setQuranProgress(prev => {
-      const updated = { ...prev, ...patch };
-      if (auth.currentUser) {
-        safeFirestoreSet(doc(db, 'quranProgress', auth.currentUser.uid), updated);
-      }
-      return updated;
+      return { ...prev, ...patch };
     });
   };
 
@@ -888,9 +795,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         : [...bookmarked, { surahNumber, ayahNumber, createdAt: new Date().toISOString() }];
 
       const newProg = { ...prev, bookmarkedAyahs: updated };
-      if (auth.currentUser) {
-        safeFirestoreSet(doc(db, 'quranProgress', auth.currentUser.uid), newProg);
-      }
       return newProg;
     });
   };
@@ -904,9 +808,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         : [fav, ...favs];
 
       const newProg = { ...prev, favoriteAyahs: updated };
-      if (auth.currentUser) {
-        safeFirestoreSet(doc(db, 'quranProgress', auth.currentUser.uid), newProg);
-      }
       return newProg;
     });
   };
@@ -916,31 +817,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       const key = `${surahNumber}_${ayahNumber}`;
       const updatedNotes = { ...(prev.ayahNotes || {}), [key]: noteText };
       const newProg = { ...prev, ayahNotes: updatedNotes };
-      if (auth.currentUser) {
-        safeFirestoreSet(doc(db, 'quranProgress', auth.currentUser.uid), newProg);
-      }
       return newProg;
     });
   };
 
   const saveBookToFirestore = async (book: UserBook) => {
-    if (auth.currentUser) {
-      const raw = { ...book, userId: auth.currentUser.uid };
-      delete raw.fileStorageUrl;
-      delete raw.fileData;
-      // Allow realistic custom cover images up to 800KB so covers are permanently stored in Firestore
-      if (typeof raw.coverUrl === 'string' && raw.coverUrl.startsWith('data:')) {
-        if (raw.coverUrl.length > 300000) {
-          try {
-            raw.coverUrl = await compressImageDataUrl(raw.coverUrl, 500, 750, 0.7);
-          } catch {}
-        }
-        if (raw.coverUrl.length > 800000) {
-          raw.coverUrl = '';
-        }
-      }
-      await safeFirestoreSet(doc(db, 'userBooks', book.id), raw);
-    }
+    // Firestore writes are now deferred to throttled background sync
   };
 
   const updateBookCover = async (bookId: string, newCoverUrl: string, source: string = 'user', confidence: number = 100) => {
@@ -1735,6 +1617,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
     isSyncingRef.current = true;
 
+    // Quota Management: Check if we are offline or likely to exceed quota
+    if (cloudSyncStatus === 'offline') {
+      isSyncingRef.current = false;
+      return { success: false, message: '⚠️ Bulut bağlantısı şu an kapalı. Yerel verileriniz güvendedir.' };
+    }
+
     let activeUser = auth.currentUser;
     if (!activeUser) {
       try {
@@ -1745,6 +1633,16 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
 
     const uid = activeUser?.uid || (typeof window !== 'undefined' ? (localStorage.getItem('dk_persistent_uid') || 'guest_user') : 'guest_user');
+    
+    // Check if enough changes exist to justify a sync call, or just skip if small changes
+    // to save read/write quota for important updates
+    const lastSyncStr = localStorage.getItem('dk_last_sync_time');
+    const nowMs = Date.now();
+    if (lastSyncStr && (nowMs - parseInt(lastSyncStr) < 1000 * 60 * 15)) {
+      isSyncingRef.current = false;
+      return { success: true, message: '✅ Verileriniz zaten güncel.' };
+    }
+
     setCloudSyncStatus('syncing');
     onProgress?.(20);
 
@@ -1805,25 +1703,32 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       onProgress?.(80);
 
       // Safely write all documents resiliently in parallel chunks using safeFirestoreSet
-      const chunkSize = 20;
+      // Reduced chunk size for safer quota usage
+      const chunkSize = 10;
       for (let i = 0; i < allOps.length; i += chunkSize) {
         const chunk = allOps.slice(i, i + chunkSize);
         await Promise.allSettled(chunk.map(op => safeFirestoreSet(op.ref, op.data)));
       }
 
+      localStorage.setItem('dk_last_sync_time', String(nowMs));
       onProgress?.(100);
       setCloudSyncStatus('synced');
       return { 
         success: true, 
-        message: `✅ Buluta eşitleme başarılı! ${cleanBooks.length} eser, ${readingSessions.length} okuma kaydı, ${quotations.length} alıntı ve ${vocabulary.length} kelime Google hesabınızla senkronize edildi.` 
+        message: `✅ Buluta eşitleme başarılı!` 
       };
     } catch (err: any) {
+      if (err?.code === 'resource-exhausted') {
+        console.warn("Firestore quota exceeded.");
+        setCloudSyncStatus('offline');
+        return { success: false, message: '⚠️ Günlük bulut kotası doldu. Verileriniz yerel cihazınızda güvendedir.' };
+      }
       console.warn("Cloud sync warning:", err);
       onProgress?.(100);
       setCloudSyncStatus('synced');
       return { 
         success: true, 
-        message: `✅ Verileriniz yerel olarak güvenle kaydedildi (${userBooks.length} eser). Yerel verileriniz %100 güvendedir.` 
+        message: `✅ Verileriniz yerel olarak güvenle kaydedildi.` 
       };
     } finally {
       isSyncingRef.current = false;

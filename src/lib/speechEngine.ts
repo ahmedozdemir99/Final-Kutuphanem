@@ -288,7 +288,8 @@ function fallbackToBrowserSpeech(
       .replace(/([.?!;:\n])\s+/g, '$1|')
       .split('|')
       .map(s => s.trim())
-      .filter(s => s.length > 0);
+      .filter(s => s.length > 0)
+      .flatMap(s => s.length > 300 ? s.match(/.{1,300}/g) || [s] : s); // Chunk long sentences
 
     const sentences = rawSentences.length > 0 ? rawSentences : [text];
 
