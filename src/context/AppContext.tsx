@@ -1,6 +1,6 @@
 import React, { createContext, useContext, useState, useEffect } from 'react';
 import { onAuthStateChanged, signInAnonymously, User as FirebaseUser } from 'firebase/auth';
-import { collection, doc, onSnapshot, setDoc, deleteDoc, query, where, getDocs } from 'firebase/firestore';
+import { collection, doc, setDoc, deleteDoc, query, where, getDocs } from 'firebase/firestore';
 import { BookReview, BookStatus, MainTab, Quotation, ReadingSession, UserBook, UserProfile, VocabularyItem, QuranProgress, AppNotification, Badge } from '../types';
 import { DEFAULT_USER_BOOKS, DEFAULT_BOOK_COVERS, MAIN_CATEGORIES, inferCategoryForBook } from '../data/catalogData';
 import { PERMANENT_BOOKS } from '../data/permanentBooks';
@@ -703,15 +703,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const unsubscribeAuth = onAuthStateChanged(auth, (user) => {
       setCurrentUser(user);
       if (user) {
-        setCloudSyncStatus('syncing');
-        setUserProfile(prev => ({
-          ...prev,
-          uid: user.uid,
-          displayName: user.displayName || prev.displayName,
-          email: user.email || prev.email,
-          photoURL: user.photoURL || prev.photoURL
-        }));
-
+        setCloudSyncStatus('synced');
         // Manual fetch only: No automatic fetch on auth load to save quota
         setUserProfile(prev => ({
           ...prev,

@@ -351,15 +351,14 @@ export const CoverManagerModal: React.FC<CoverManagerModalProps> = ({ isOpen, on
                         Tek tıkla Google Görseller araması açılır. Resmi kopyalayıp URL kutusuna yapıştırabilirsiniz.
                       </p>
                     </div>
-                    <button
-                      onClick={() => {
-                        const searchQ = encodeURIComponent(`${editingBook.title} ${editingBook.author} kitap kapağı`);
-                        window.open(`https://www.google.com/search?tbm=isch&q=${searchQ}`, '_blank');
-                      }}
+                    <a
+                      href={`https://www.google.com/search?tbm=isch&q=${encodeURIComponent(`${editingBook.title} ${editingBook.author} kitap kapağı`)}`}
+                      target="_blank"
+                      rel="noopener noreferrer"
                       className="px-4 py-2.5 rounded-xl bg-gradient-to-r from-blue-600 to-indigo-700 hover:from-blue-700 hover:to-indigo-800 text-white font-bold text-xs shadow-md transition-all shrink-0 flex items-center gap-1.5"
                     >
                       <span>Google'da Ara 🔍</span>
-                    </button>
+                    </a>
                   </div>
                 </div>
 

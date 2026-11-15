@@ -46,7 +46,7 @@ export const ChapterAnalysisModal: React.FC<ChapterAnalysisModalProps> = ({
     setLoading(true);
     setErrorMsg(null);
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 3000);
+    const timeoutId = setTimeout(() => controller.abort(), 20000);
 
     try {
       const res = await fetch('/api/chapter-analysis', {

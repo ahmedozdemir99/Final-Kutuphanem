@@ -644,7 +644,10 @@ export const TodayView: React.FC = () => {
 
                       <div className="flex items-center gap-2 pt-1">
                         <button
-                          onClick={() => setActiveBookForReader(book)}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setActiveBookForReader(book);
+                          }}
                           className="px-2.5 py-1 rounded-md bg-[#742C3C] text-white text-[11px] font-semibold hover:bg-[#4B1E2B] transition-colors flex items-center gap-1"
                         >
                           <Play className="w-3 h-3 fill-current" />
@@ -652,7 +655,10 @@ export const TodayView: React.FC = () => {
                         </button>
 
                         <button
-                          onClick={() => handleOpenPageUpdateModal(book)}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleOpenPageUpdateModal(book);
+                          }}
                           className="px-2.5 py-1 rounded-md border border-slate-300 dark:border-slate-700 text-xs font-semibold hover:bg-black/5 dark:hover:bg-white/5 transition-colors flex items-center gap-1 text-slate-700 dark:text-slate-300"
                         >
                           <Edit3 className="w-3 h-3" />

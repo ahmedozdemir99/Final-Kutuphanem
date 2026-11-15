@@ -161,17 +161,16 @@ export const BookDetailModal: React.FC<BookDetailModalProps> = ({ book, onClose,
             </div>
 
             <div className="flex flex-col gap-1.5 w-full pt-1">
-              <button
-                onClick={() => {
-                  const searchQ = encodeURIComponent(`${currentBook.title} ${currentBook.author} kitap kapağı`);
-                  window.open(`https://www.google.com/search?tbm=isch&q=${searchQ}`, '_blank');
-                }}
+              <a
+                href={`https://www.google.com/search?tbm=isch&q=${encodeURIComponent(`${currentBook.title} ${currentBook.author} kitap kapağı`)}`}
+                target="_blank"
+                rel="noopener noreferrer"
                 className="w-full py-2 px-2.5 rounded-xl bg-gradient-to-r from-blue-600 to-indigo-700 hover:from-blue-700 hover:to-indigo-800 text-white text-[11px] font-bold shadow-sm transition-all flex items-center justify-center gap-1.5 cursor-pointer"
                 title="Google Görseller'de Kitap Kapağı Ara"
               >
                 <Search className="w-3.5 h-3.5 text-blue-200 shrink-0" />
                 <span>Google Görseller'de Kapak Ara 🔍</span>
-              </button>
+              </a>
 
               <div className="flex items-center gap-1.5 w-full">
                 <label className="flex-1 cursor-pointer py-1.5 px-2 rounded-xl bg-black/5 dark:bg-white/5 hover:bg-black/10 text-[11px] font-semibold text-center flex items-center justify-center gap-1">

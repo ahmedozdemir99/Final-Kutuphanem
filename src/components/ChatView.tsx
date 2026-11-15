@@ -1,11 +1,12 @@
 import React, { useState, useRef, useEffect, useMemo, useCallback } from 'react';
 import { 
   Sparkles, Send, User, Database, Search, Library, 
-  Mic, MicOff, Volume2, VolumeX, Square, Radio, Play, Headphones, AlertCircle, RefreshCw, ExternalLink,
-  Sliders, Check
+  Mic, MicOff, Volume2, Square, Radio, Play, Headphones, AlertCircle, RefreshCw, ExternalLink,
+  Sliders, Check, Trash2, Globe
 } from 'lucide-react';
-import { collection, query, where, orderBy, getDocs, addDoc } from 'firebase/firestore';
-import { db, auth } from '../lib/firebase';
+import { onAuthStateChanged } from 'firebase/auth';
+import { collection, query, where, getDocs, addDoc } from 'firebase/firestore';
+import { db, auth, handleFirestoreError, OperationType } from '../lib/firebase';
 import { useApp } from '../context/AppContext';
 import { FULL_FOUR_YEAR_CURRICULUM } from '../data/catalogData';
 import { getFull256PoetryCollection } from '../data/poetryData';
@@ -15,15 +16,23 @@ import {
   VOICE_PRESETS, 
   getVoicePreset, 
   speakVoiceText, 
-  stopAllSpeech, 
-  VoicePreset 
+  stopAllSpeech
 } from '../lib/speechEngine';
 
 interface Message {
   role: 'user' | 'model';
   text: string;
   ragSummary?: string[];
+  sourceUrls?: string[];
+  createdAt?: string;
 }
+
+type ChatMode = 'deep' | 'balanced' | 'source';
+
+const INITIAL_GREETING_MESSAGE: Message = {
+  role: 'model',
+  text: `Selâmün Aleyküm! 🐿️ Ben ilim, edebiyat ve tefekkür yoldaşın **Robi**'yim! Önceki sohbetlerimizden ilgi alanlarını hatırlıyor; 12 ana kategoriden 256 şiirlik antolojiye, klasik müfredattan Google kitap ve bilgi veritabanına kadar geniş bir ufuktan besleniyorum. Bugün hangi düşünceyi, kitabı veya mısrayı birlikte derinleştirelim?`
+};
 
 // Metni Türkçe seslendirme için estetik, akıcı ve doğal telaffuza dönüştüren temizleme fonksiyonu
 function cleanTextForSpeech(text: string): string {
@@ -61,40 +70,103 @@ export const ChatView: React.FC = () => {
   const { userBooks, readingSessions, quotations, userProfile, reviews, vocabulary } = useApp();
   const fullPoetryCollection = useMemo(() => getFull256PoetryCollection(), []);
 
-  const [inputMessage, setInputMessage] = useState('');
-  const [isLoading, setIsLoading] = useState(false);
+  const [messages, setMessages] = useState<Message[]>(() => {
+    try {
+      const uid = auth.currentUser?.uid || localStorage.getItem('dk_persistent_uid') || 'default';
+      const raw =
+        localStorage.getItem(`chat_history_${uid}`) ||
+        localStorage.getItem('dk_robi_chat_history');
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          return parsed;
+        }
+      }
+    } catch {}
+    return [INITIAL_GREETING_MESSAGE];
+  });
+  const [inputMessage, setInputMessage] = useState<string>('');
+  const [isLoading, setIsLoading] = useState<boolean>(false);
+  const [showRagDetails, setShowRagDetails] = useState<boolean>(false);
+  const [chatMode, setChatMode] = useState<ChatMode>('deep');
+  const [showClearConfirm, setShowClearConfirm] = useState<boolean>(false);
+  const [activeUid, setActiveUid] = useState<string>(() => {
+    try {
+      return userProfile.uid || auth.currentUser?.uid || localStorage.getItem('dk_persistent_uid') || 'default';
+    } catch {
+      return 'default';
+    }
+  });
+  const [lastRagSources, setLastRagSources] = useState<string[]>([]);
 
-  const [messages, setMessages] = useState<Message[]>([{
-    role: 'model',
-    text: `Selâmün Aleyküm! 🐿️ Ben senin bilge sincap koçun ve ilim arkadaşın **Robi**'yim! Kütüphanendeki 12 ana kategoriye, tamamlanan ve okunacak eserlerine, 256 şiir arşivimize ve 40 yıllık ilim müfredatımıza tam vukufiyetle hakimim. Bugün hangi hikmetli konuyu ele alalım?`
-  }]);
-
-  // Load chat history on mount from LocalStorage, fallback to Firestore only if LocalStorage is empty
+  const messagesRef = useRef<Message[]>(messages);
   useEffect(() => {
+    messagesRef.current = messages;
+  }, [messages]);
+
+  // Listen for Firebase auth readiness reactively
+  useEffect(() => {
+    const unsub = onAuthStateChanged(auth, (user) => {
+      if (user?.uid) {
+        setActiveUid(user.uid);
+      }
+    });
+    return () => unsub();
+  }, []);
+
+  useEffect(() => {
+    if (userProfile.uid && userProfile.uid !== activeUid) {
+      setActiveUid(userProfile.uid);
+    }
+  }, [userProfile.uid, activeUid]);
+
+  // Load chat history from LocalStorage first; fallback to Firestore only if LocalStorage is completely empty
+  useEffect(() => {
+    let cancelled = false;
     const loadHistory = async () => {
-      if (!auth.currentUser) return;
-      
-      const cachedHistory = localStorage.getItem(`chat_history_${auth.currentUser.uid}`);
-      if (cachedHistory) {
-        setMessages(JSON.parse(cachedHistory));
-        return;
+      try {
+        const cachedRaw =
+          localStorage.getItem(`chat_history_${activeUid}`) ||
+          localStorage.getItem('dk_robi_chat_history');
+        if (cachedRaw) {
+          const parsed = JSON.parse(cachedRaw);
+          if (Array.isArray(parsed) && parsed.length > 0) {
+            if (!cancelled) setMessages(parsed);
+            return;
+          }
+        }
+      } catch {
+        // Ignore corrupt localStorage entry
       }
 
-      const q = query(
-        collection(db, 'chatMessages'),
-        where('userId', '==', auth.currentUser.uid),
-        orderBy('createdAt', 'asc')
-      );
-      const snapshot = await getDocs(q);
-      const hist = snapshot.docs.map(doc => doc.data() as Message);
-      if (hist.length > 0) {
-        setMessages(hist);
-        localStorage.setItem(`chat_history_${auth.currentUser.uid}`, JSON.stringify(hist));
+      if (!auth.currentUser) return;
+      try {
+        const q = query(
+          collection(db, 'chatMessages'),
+          where('userId', '==', auth.currentUser.uid)
+        );
+        const snapshot = await getDocs(q);
+        const hist = snapshot.docs
+          .map(docSnap => docSnap.data() as Message)
+          .sort((a, b) => (a.createdAt || '').localeCompare(b.createdAt || ''));
+
+        if (!cancelled && hist.length > 0) {
+          setMessages(hist);
+          try {
+            const serialized = JSON.stringify(hist.slice(-60));
+            localStorage.setItem(`chat_history_${auth.currentUser.uid}`, serialized);
+            localStorage.setItem('dk_robi_chat_history', serialized);
+          } catch {}
+        }
+      } catch (err) {
+        handleFirestoreError(err, OperationType.LIST, 'chatMessages');
       }
     };
     loadHistory();
-  }, [userProfile.displayName]);
-  const [lastRagSources, setLastRagSources] = useState<string[]>([]);
+    return () => {
+      cancelled = true;
+    };
+  }, [activeUid]);
   
   // Sesli Sohbet, Estetik Ses Tonu ve Karşılıklı Konuşma Durumları
   const [isListening, setIsListening] = useState<boolean>(false);
@@ -360,6 +432,18 @@ export const ChatView: React.FC = () => {
     }
   };
 
+  const handleClearChat = () => {
+    stopSpeaking();
+    const resetMsgs = [INITIAL_GREETING_MESSAGE];
+    setMessages(resetMsgs);
+    setShowClearConfirm(false);
+    try {
+      const serialized = JSON.stringify(resetMsgs);
+      localStorage.setItem(`chat_history_${activeUid}`, serialized);
+      localStorage.setItem('dk_robi_chat_history', serialized);
+    } catch {}
+  };
+
   // Mesaj Gönderme
   const handleSendMessage = async (textToSend?: string) => {
     const text = textToSend || inputMessage;
@@ -370,13 +454,22 @@ export const ChatView: React.FC = () => {
     stopSpeaking();
     stopListening();
 
-    const userMsg: Message = { role: 'user', text: text.trim() };
-    setMessages(prev => [...prev, userMsg]);
+    const nowIso = new Date().toISOString();
+    const userMsg: Message = { role: 'user', text: text.trim(), createdAt: nowIso };
+    const baseHistory = messagesRef.current;
+    const withUserMsgs = [...baseHistory, userMsg];
+    setMessages(withUserMsgs);
+    try {
+      const serialized = JSON.stringify(withUserMsgs.slice(-60));
+      localStorage.setItem(`chat_history_${activeUid}`, serialized);
+      localStorage.setItem('dk_robi_chat_history', serialized);
+    } catch {}
+
     if (!textToSend) setInputMessage('');
     setIsLoading(true);
 
     try {
-      // 1. Perform client-side Vector RAG Search over all user data, 1920-book curriculum, notes, and 256 poems
+      // 1. Perform client-side Vector RAG Search over library interests, 1920-book curriculum, notes, and 256 poems
       const ragResult = buildVectorRAGContext({
         query: text.trim(),
         userBooks,
@@ -393,12 +486,13 @@ export const ChatView: React.FC = () => {
       // Update source highlights for UI indicator only if genuine query matches were retrieved
       const activeSources = [
         ...ragResult.retrievedBooks.slice(0, 2),
-        ...ragResult.retrievedQuotes.slice(0, 2),
+        ...ragResult.retrievedQuotes.slice(0, 1),
+        ...ragResult.retrievedPoetry.slice(0, 2),
         ...ragResult.retrievedCurriculum.slice(0, 2)
       ];
       setLastRagSources(activeSources);
 
-      const history = [...messages, userMsg].map(m => ({
+      const historyPayload = withUserMsgs.slice(-18).map(m => ({
         role: m.role,
         parts: [{ text: m.text }]
       }));
@@ -408,9 +502,13 @@ export const ChatView: React.FC = () => {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           message: text.trim(),
-          history,
+          mode: chatMode,
+          history: historyPayload,
           densePromptContext: ragResult.densePromptContext,
-          userSummary: ragResult.summary
+          userSummary: {
+            displayName: userProfile.displayName,
+            ...ragResult.summary
+          }
         })
       });
 
@@ -427,24 +525,45 @@ export const ChatView: React.FC = () => {
       }
 
       const replyText = data.reply || 'Yanıt alınamadı.';
-      const newModelIdx = messages.length + 1;
-
       const modelMsg: Message = { 
         role: 'model', 
         text: replyText,
-        ragSummary: activeSources.length > 0 ? activeSources : undefined
+        ragSummary: activeSources.length > 0 ? activeSources : undefined,
+        sourceUrls: Array.isArray(data.sourceUrls) && data.sourceUrls.length > 0 ? data.sourceUrls : undefined,
+        createdAt: new Date().toISOString()
       };
       
-      setMessages(prev => [...prev, modelMsg]);
+      const updatedHistory = [...withUserMsgs, modelMsg];
+      const newModelIdx = updatedHistory.length - 1;
+      setMessages(updatedHistory);
 
-      // Save user and model messages to Firestore
+      // Always persist conversation memory locally first so messages are never lost across tabs/reloads or quota limits
+      try {
+        const serialized = JSON.stringify(updatedHistory.slice(-60));
+        localStorage.setItem(`chat_history_${activeUid}`, serialized);
+        localStorage.setItem('dk_robi_chat_history', serialized);
+      } catch {}
+
+      // Best-effort Firestore persistence (non-blocking if quota exceeded)
       if (auth.currentUser) {
-        await addDoc(collection(db, 'chatMessages'), { ...userMsg, userId: auth.currentUser.uid, createdAt: new Date().toISOString() });
-        await addDoc(collection(db, 'chatMessages'), { ...modelMsg, userId: auth.currentUser.uid, createdAt: new Date().toISOString() });
-        
-        // Update LocalStorage cache
-        const updatedHistory = [...messages, userMsg, modelMsg];
-        localStorage.setItem(`chat_history_${auth.currentUser.uid}`, JSON.stringify(updatedHistory));
+        const uid = auth.currentUser.uid;
+        Promise.all([
+          addDoc(collection(db, 'chatMessages'), {
+            role: userMsg.role,
+            text: userMsg.text,
+            userId: uid,
+            createdAt: userMsg.createdAt || nowIso
+          }),
+          addDoc(collection(db, 'chatMessages'), {
+            role: modelMsg.role,
+            text: modelMsg.text,
+            ...(modelMsg.sourceUrls ? { sourceUrls: modelMsg.sourceUrls } : {}),
+            userId: uid,
+            createdAt: modelMsg.createdAt || new Date().toISOString()
+          })
+        ]).catch(err => {
+          handleFirestoreError(err, OperationType.CREATE, 'chatMessages');
+        });
       }
 
       // Eğer Eller Serbest Modu açıksa, Robi cevabı otomatik olarak seslendirir!
@@ -456,8 +575,16 @@ export const ChatView: React.FC = () => {
 
     } catch (err: any) {
       console.error("Chat error:", err);
-      const errorMsg = `🐿️ Üzgünüm dostum, fındık ambarımda bir hata oluştu: ${err.message || 'Bilinmeyen hata'}. Lütfen tekrar dener misin?`;
-      setMessages(prev => [...prev, { role: 'model', text: errorMsg }]);
+      const errorMsg = `🐿️ Üzgünüm dostum, şu an yanıt oluştururken geçici bir aksaklık oldu (${err.message || 'Bağlantı hatası'}). Lütfen tekrar dener misin?`;
+      setMessages(prev => {
+        const next = [...prev, { role: 'model' as const, text: errorMsg, createdAt: new Date().toISOString() }];
+        try {
+          const serialized = JSON.stringify(next.slice(-60));
+          localStorage.setItem(`chat_history_${activeUid}`, serialized);
+          localStorage.setItem('dk_robi_chat_history', serialized);
+        } catch {}
+        return next;
+      });
       if (voiceChatModeRef.current) {
         speakMessage(errorMsg);
       }
@@ -467,10 +594,10 @@ export const ChatView: React.FC = () => {
   };
 
   const quickPrompts = [
-    "🐿️ 12 Ana kategoriye ve kütüphaneme göre bana derin bir okuma haritası sun.",
-    "🌐 Project Gutenberg ve yabancı arşivlerden Gazali ve Kant karşılaştırması bul ve çevir.",
-    "📚 40 Yıllık okuma planımdaki ilk yıl klasiklerinden birini detaylandır.",
-    "🖋️ Antolojimizdeki şiirlerden ve alıntılarımdan bana bir tefekkür mısrası seç."
+    "🐿️ İlgi alanlarıma göre bana kişiselleştirilmiş bir kitap ve şiir okuma listesi hazırla.",
+    "🌐 Google veritabanından ve dünya edebiyatından Gazâlî ile Kant’ı karşılaştır.",
+    "📚 40 Yıllık ilim müfredatındaki temel felsefe ve edebiyat eserlerinden seçki sun.",
+    "🖋️ Antolojiden ve dünya şiirinden bana tefekkür dolu mısralar paylaş ve şerh et."
   ];
 
   return (
@@ -543,8 +670,36 @@ export const ChatView: React.FC = () => {
               className="px-3 py-1.5 rounded-xl bg-white/10 hover:bg-white/20 text-xs font-medium text-amber-200 border border-white/10 flex items-center gap-1.5 transition-all"
             >
               <Database className="w-3.5 h-3.5 text-amber-300" />
-              <span>12 Kategori & RAG</span>
+              <span>Kaynaklar & Mod</span>
             </button>
+
+            {/* Sohbeti Sıfırla Butonu */}
+            {messages.length > 1 && (
+              showClearConfirm ? (
+                <div className="flex items-center gap-1 bg-black/30 px-2 py-1 rounded-xl border border-white/15">
+                  <button
+                    onClick={handleClearChat}
+                    className="px-2 py-0.5 rounded-lg bg-rose-600 text-white text-[10px] font-bold hover:bg-rose-500"
+                  >
+                    Temizle
+                  </button>
+                  <button
+                    onClick={() => setShowClearConfirm(false)}
+                    className="px-2 py-0.5 rounded-lg bg-white/10 text-white/80 text-[10px] hover:bg-white/20"
+                  >
+                    İptal
+                  </button>
+                </div>
+              ) : (
+                <button
+                  onClick={() => setShowClearConfirm(true)}
+                  className="px-2.5 py-1.5 rounded-xl bg-white/10 hover:bg-rose-600/80 text-white/80 hover:text-white text-xs font-medium border border-white/10 flex items-center gap-1 transition-all"
+                  title="Sohbet geçmişini temizle"
+                >
+                  <Trash2 className="w-3.5 h-3.5" />
+                </button>
+              )
+            )}
 
             {/* Konuşuyorsa Sustur Butonu */}
             {isSpeaking && (
@@ -557,6 +712,50 @@ export const ChatView: React.FC = () => {
                 <span>Sustur</span>
               </button>
             )}
+          </div>
+        </div>
+
+        {/* Mod Seçici Bar */}
+        <div className="mt-3 pt-2.5 border-t border-white/10 flex flex-wrap items-center justify-between gap-2 text-[11px] relative z-10">
+          <span className="text-white/75 font-medium flex items-center gap-1.5">
+            <Globe className="w-3.5 h-3.5 text-amber-300" />
+            <span>Düşünce & Kaynak Modu:</span>
+          </span>
+          <div className="flex items-center gap-1.5">
+            <button
+              type="button"
+              onClick={() => setChatMode('deep')}
+              className={`px-2.5 py-1 rounded-lg font-semibold transition-all cursor-pointer ${
+                chatMode === 'deep'
+                  ? 'bg-amber-400 text-slate-950 shadow-sm'
+                  : 'bg-white/10 text-white/80 hover:bg-white/20'
+              }`}
+            >
+              Derin Tefekkür
+            </button>
+            <button
+              type="button"
+              onClick={() => setChatMode('balanced')}
+              className={`px-2.5 py-1 rounded-lg font-semibold transition-all cursor-pointer ${
+                chatMode === 'balanced'
+                  ? 'bg-amber-400 text-slate-950 shadow-sm'
+                  : 'bg-white/10 text-white/80 hover:bg-white/20'
+              }`}
+            >
+              Hızlı & Dengeli
+            </button>
+            <button
+              type="button"
+              onClick={() => setChatMode('source')}
+              className={`px-2.5 py-1 rounded-lg font-semibold transition-all cursor-pointer ${
+                chatMode === 'source'
+                  ? 'bg-amber-400 text-slate-950 shadow-sm'
+                  : 'bg-white/10 text-white/80 hover:bg-white/20'
+              }`}
+              title="Mesajdaki web bağlantısını doğrudan inceler"
+            >
+              URL Kaynak İncele
+            </button>
           </div>
         </div>
 
@@ -715,19 +914,15 @@ export const ChatView: React.FC = () => {
             </div>
             <div className="flex items-center gap-2 pt-1 flex-wrap">
               {/* Doğrudan bağımsız sekmede açma (Iframe kısıtlamasını sıfırlar, mikrofonu anında etkinleştirir) */}
-              <button
-                onClick={() => {
-                  try {
-                    window.open(window.location.href, '_blank');
-                  } catch (e) {
-                    window.location.reload();
-                  }
-                }}
+              <a
+                href={typeof window !== 'undefined' ? window.location.href : '/'}
+                target="_blank"
+                rel="noopener noreferrer"
                 className="px-3.5 py-1.5 rounded-xl bg-amber-400 hover:bg-amber-300 text-slate-950 font-bold text-xs flex items-center gap-1.5 transition-all shadow-md active:scale-95"
               >
                 <ExternalLink className="w-3.5 h-3.5" />
                 <span>Yeni Sekmede Aç & Konuş (Kesin Çözüm)</span>
-              </button>
+              </a>
 
               <button
                 onClick={startListening}
@@ -787,10 +982,10 @@ export const ChatView: React.FC = () => {
           <div className="mt-4 pt-3 border-t border-white/10 text-xs text-amber-100 space-y-1.5 animate-in fade-in duration-200">
             <div className="flex items-center gap-2 font-semibold">
               <Search className="w-3.5 h-3.5 text-emerald-400" />
-              <span>Tüm Veritabanı ve 12 Kategoriye Hakim İlim Katmanı:</span>
+              <span>Tüm Veritabanı, Şiir Antolojisi ve Google Kaynak Katmanı:</span>
             </div>
             <p className="text-white/70 leading-relaxed">
-              Kütüphanenizdeki 12 ana kategori, {userBooks.length} eser (okunan, tamamlanan, okunacak), {quotations.length} alıntı, 1920 kitaplık 40 yıllık ilim müfredatı ve 256 şiir arşivinin tamamı Robi’nin zihin ambarındadır. Mikrofonunuza dokunarak Türkçe sesle soru sorabilir ve sesli cevap alabilirsiniz.
+              12 ana kategori, {userBooks.length} eserlik katalog, {quotations.length} alıntı, 1920 kitaplık 40 yıllık ilim müfredatı, 256 şiir antolojisi ve canlı Google arama/kitap veritabanı Robi’nin hafızasındadır. Okuma sayfa sayınız veya bireysel ilerlemeniz paylaşılmadan yalnızca düşünce dünyanıza uygun eserler ve mısralarla hasbihal edilir.
             </p>
           </div>
         )}
@@ -852,11 +1047,38 @@ export const ChatView: React.FC = () => {
                 {msg.text}
               </div>
 
+              {msg.sourceUrls && msg.sourceUrls.length > 0 && (
+                <div className="mt-3 pt-2 border-t border-black/10 dark:border-white/10 text-[11px] space-y-1">
+                  <div className="flex items-center gap-1 font-sans font-semibold text-emerald-700 dark:text-emerald-400">
+                    <Globe className="w-3 h-3" />
+                    <span>Google Veritabanı & Doğrulanmış Kaynaklar:</span>
+                  </div>
+                  <div className="flex flex-wrap gap-1.5 pt-0.5">
+                    {msg.sourceUrls.map((url, uIdx) => {
+                      let label = url;
+                      try { label = new URL(url).hostname.replace(/^www\./, ''); } catch {}
+                      return (
+                        <a
+                          key={uIdx}
+                          href={url}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="inline-flex items-center gap-1 px-2 py-0.5 rounded-lg bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-800 dark:text-emerald-300 font-sans text-[10px] transition-colors"
+                        >
+                          <ExternalLink className="w-2.5 h-2.5 shrink-0" />
+                          <span className="truncate max-w-[160px]">{label}</span>
+                        </a>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+
               {msg.ragSummary && msg.ragSummary.length > 0 && (
                 <div className="mt-3 pt-2 border-t border-black/10 dark:border-white/10 text-[11px] text-amber-700 dark:text-amber-400/90 space-y-1">
                   <div className="flex items-center gap-1 font-sans font-semibold">
                     <Library className="w-3 h-3 text-amber-600" />
-                    <span>Çapraz Kütüphane & Müfredat İrtibatı:</span>
+                    <span>İlgili Katalog, Şiir & Müfredat İrtibatı:</span>
                   </div>
                   {msg.ragSummary.map((src, sIdx) => (
                     <div key={sIdx} className="line-clamp-1 font-sans opacity-90">{src}</div>
@@ -874,7 +1096,7 @@ export const ChatView: React.FC = () => {
             </div>
             <div className="p-3.5 rounded-2xl bg-[#F8F5EF] dark:bg-[#141414] text-xs text-slate-500 italic flex items-center gap-2">
               <span className="animate-spin">🌰</span>
-              <span>Robi 12 kategoriyi, kütüphaneni, 40 yıllık planı ve şiirleri tarıyor...</span>
+              <span>Robi 12 kategoriyi, 256 şiiri, müfredatı ve Google veritabanını tarıyor...</span>
             </div>
           </div>
         )}

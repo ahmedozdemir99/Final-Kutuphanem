@@ -6,6 +6,7 @@ import fs from 'fs';
 import path from 'path';
 import webpush from 'web-push';
 import { askRobiBrain } from './src/utils/robiBrain.ts';
+import { generateRobiChat, normalizeRobiMode } from './src/utils/robiChat.ts';
 
 // WebPush VAPID Setup for Background Notifications (delivers even when app is closed)
 const VAPID_PUBLIC_KEY = process.env.VAPID_PUBLIC_KEY || 'BB91Tt47oG2rr99hCjR0-nSCVHnDio1XzwIvZqd5bem2W6lQndUzw-uvYVH3pdClkjKwcdVyjNcTv6bV3EOIUnQ';
@@ -79,7 +80,7 @@ async function startServer() {
     const key = process.env.GEMINI_API_KEY || '';
     const ai = getGenAI();
     const results: any[] = [];
-    for (const m of ['gemini-flash-latest', 'gemini-3.8-flash', 'gemini-3.1-flash-lite']) {
+    for (const m of ['gemini-4-hydrogen', 'gemini-3.1-flash-lite']) {
       try {
         const r = await ai.models.generateContent({ model: m, contents: 'Merhaba, bana 1 cümle ile Gazaliyi anlat.' });
         results.push({ model: m, status: 'ok', text: r.text });
@@ -186,7 +187,7 @@ async function startServer() {
 
       const currentAi = getGenAI();
       const response = await currentAi.models.generateContent({
-        model: 'gemini-2.5-flash',
+        model: 'gemini-3.8-flash-lite-tts',
         contents: [
           {
             role: 'user',
@@ -352,7 +353,44 @@ async function startServer() {
     return hash;
   }
 
-  // Smart AI Book Recommendations based on reader's library, preferences, and goals
+  async function fetchGoogleBooksContext(queryText: string): Promise<string> {
+    const cleanQ = (queryText || '').trim().slice(0, 120);
+    if (!cleanQ) return '';
+    try {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 2500);
+      const url = `https://www.googleapis.com/books/v1/volumes?q=${encodeURIComponent(cleanQ)}&maxResults=5&printType=books`;
+      const resp = await fetch(url, { signal: controller.signal });
+      clearTimeout(timer);
+      if (!resp.ok) return '';
+      const json: any = await resp.json();
+      const items = Array.isArray(json?.items) ? json.items : [];
+      if (items.length === 0) return '';
+      return items
+        .map((it: any) => {
+          const v = it?.volumeInfo || {};
+          const title = v.title || '';
+          const authors = Array.isArray(v.authors) ? v.authors.join(', ') : '';
+          const desc = typeof v.description === 'string' ? v.description.slice(0, 160) : '';
+          return `• ${title}${authors ? ` (${authors})` : ''}${desc ? ` — ${desc}` : ''}`;
+        })
+        .filter(Boolean)
+        .join('\n');
+    } catch {
+      return '';
+    }
+  }
+
+  function safeParseJsonObject(raw: string): any {
+    const cleaned = (raw || '')
+      .trim()
+      .replace(/^```(?:json)?\s*/i, '')
+      .replace(/```$/i, '')
+      .trim();
+    return JSON.parse(cleaned);
+  }
+
+  // Smart AI Book Recommendations based on reader's interests, chat history, and quotations
   app.post('/api/ai-recommendations', async (req, res) => {
     res.setHeader('Content-Type', 'application/json');
     try {
@@ -362,33 +400,33 @@ async function startServer() {
         return res.status(500).json({ error: 'GEMINI_API_KEY bulunamadı.' });
       }
 
-      const prompt = `Sen entelektüel, edebi ve felsefi bir okuma danışmanısın. Kullanıcının detaylı okuma ve düşünce profili:
-- Okuma listesindeki / Kütüphanesindeki kitaplar: ${JSON.stringify(currentBooks || [])}
+      const prompt = `Sen entelektüel, edebi ve felsefi bir okuma danışmanısın. Kullanıcının düşünce ve ilgi profili:
+- Kütüphane ve ilgi eksenindeki eser temaları: ${JSON.stringify((currentBooks || []).map((b: any) => ({ title: b.title, author: b.author, category: b.category })))}
 - Yapay zeka (Robi) ile sohbetlerinde tartıştığı konular ve ilgilendiği kavramlar: ${JSON.stringify(chatTopics || [])}
 - Kaydettiği favori alıntılar / şiirler: ${JSON.stringify(userQuotations || [])}
 - Seçilen odak kategori: ${preferredCategory || 'Tüm Alanlar'}
 - Okuma gayesi: ${mood || 'Derinleşme, tefekkür, entelektüel ufkunu genişletme'}
-- Günlük hedef: ${dailyTarget || 40} sayfa
+- Günlük hedef temposu: ${dailyTarget || 40} sayfa
 
-Lütfen bu okurun hem okuma geçmişini hem de yapay zekayla sohbet ettiği konuları harmanlayarak, Türkiye ve dünya edebiyatı, İslam felsefesi, tefekkür, tarih, tasavvuf ve psikoloji klasikleri arasından TAM 6 ADET son derece kişiselleştirilmiş "Akıllı Kitap Önerisi" sun.
+ÖNEMLİ KURAL: "curatorNote" ve "reason" metinlerinde ASLA kullanıcının şu an hangi kitabı okuduğunu, sayfa sayısını veya okuma yüzdesini zikretme. Bunlardan ilham alarak Türkiye ve dünya edebiyatı, İslam felsefesi, tefekkür, tarih, tasavvuf, şiir ve psikoloji klasikleri arasından TAM 6 ADET son derece kişiselleştirilmiş "Akıllı Kitap Önerisi" sun.
 
 Yanıtını MUTLAKA sadece aşağıdaki JSON formatında ver (ekstra açıklama veya markdown tırnakları eklemeden doğrudan geçerli bir JSON objesi döndür):
 {
-  "curatorNote": "Kullanıcının hem okuma listesine hem de yapay zekayla tartıştığı konulara doğrudan atıf yapan, entelektüel ve zarif 1-2 cümlelik kişiselleştirilmiş tavsiye notu.",
+  "curatorNote": "Okurun düşünce dünyasına, ilgi duyduğu temalara ve sohbet konularına hitap eden, okuma ilerlemesini ifşa etmeyen zarif 1-2 cümlelik tavsiye notu.",
   "recommendations": [
     {
       "title": "Kitap Adı",
       "author": "Yazar Adı",
-      "category": "Edebiyat / Felsefe / Tarih / Din ve İlahiyat / Psikoloji",
+      "category": "Edebiyat / Felsefe / Tarih / Din ve İlahiyat / Psikoloji / Şiir",
       "totalPages": 280,
-      "reason": "Bu kitabın okurun kütüphanesi ve sohbet konularıyla nasıl bağlantılı olduğunu açıklayan çarpıcı gerekçe.",
+      "reason": "Bu kitabın okurun fikir ve şiir dünyasıyla nasıl bağlantılı olduğunu açıklayan çarpıcı, akıcı gerekçe.",
       "estimatedDays": 7,
       "tag": "Klasik / Ufuk Açıcı / Derin Tefekkür / Başyapıt"
     }
   ]
 }`;
 
-      const modelsToTry = ['gemini-3.1-flash-lite', 'gemini-2.5-flash-lite', 'gemini-2.5-flash', 'gemini-flash-latest'];
+      const modelsToTry = ['gemini-4-hydrogen', 'gemini-3.1-flash-lite'];
       let resultText = '';
       let lastErr = null;
       const currentAi = getGenAI();
@@ -399,10 +437,11 @@ Yanıtını MUTLAKA sadece aşağıdaki JSON formatında ver (ekstra açıklama 
             model: m,
             contents: prompt,
             config: {
-              responseMimeType: "application/json"
+              responseMimeType: "application/json",
+              httpOptions: { timeout: 15000, retryOptions: { attempts: 1 } }
             }
           });
-          const timeoutPromise = new Promise<null>((resolve) => setTimeout(() => resolve(null), 3500));
+          const timeoutPromise = new Promise<null>((resolve) => setTimeout(() => resolve(null), 15000));
           const resp = await Promise.race([apiCall, timeoutPromise]);
           if (resp && (resp as any).text) {
             resultText = (resp as any).text;
@@ -417,13 +456,10 @@ Yanıtını MUTLAKA sadece aşağıdaki JSON formatında ver (ekstra açıklama 
         throw lastErr || new Error("Öneri üretilemedi.");
       }
 
-      const parsed = JSON.parse(resultText);
+      const parsed = safeParseJsonObject(resultText);
       return res.json(parsed);
     } catch (err: any) {
-      // Graceful fallback
-      const selectedCategory = (req.body?.preferredCategory || '').toLowerCase();
-      
-      let curatedList = [
+      const curatedList = [
         {
           title: "İhyâ'u Ulûmi'd-Dîn (1. Cilt: İlim ve Kalp)",
           author: "İmâm-ı Gazâlî",
@@ -463,7 +499,7 @@ Yanıtını MUTLAKA sadece aşağıdaki JSON formatında ver (ekstra açıklama 
       ];
 
       return res.json({
-        curatorNote: "Okuma çizginize ve hedefinize göre özenle seçilmiş seçkin klasik eserler:",
+        curatorNote: "İlgi alanlarınıza ve düşünce ufkunuza göre özenle seçilmiş klasik eserler:",
         recommendations: curatedList
       });
     }
@@ -472,88 +508,35 @@ Yanıtını MUTLAKA sadece aşağıdaki JSON formatında ver (ekstra açıklama 
   app.post('/api/ai-chat', async (req, res) => {
     res.setHeader('Content-Type', 'application/json');
     try {
-      const { message, history, userContext, densePromptContext, userSummary } = req.body;
-
-      const ragContextText = densePromptContext || (typeof userContext === 'string' ? userContext : JSON.stringify(userContext || {}));
-
-      const systemInstruction = `Sen Dijital Kütüphanem uygulamasının bilge, neşeli, felsefi ve ansiklopedik birikimli sincap koçu "Robi"sin (🐿️ İlim, Kültür ve Tefekkür Koçu). 
-Kullanıcı için felsefe, edebiyat, teoloji, tarih ve kişisel gelişim yolculuğunda entelektüel bir yoldaş ve koçsun.
-
-[GÖREVLERİN VE KİŞİLİĞİN]:
-1. Entelektüel ve Ansiklopedik Derinlik: Yüzeysel, kısa veya geçiştirici cevaplar verme; felsefi akımlara, klasik başyapıtlara, kavramsal tahlillere ve dil etimolojisine değinen doyurucu, derin ve zengin açıklamalar sun.
-2. Doğrudan ve Canlı Odak: Kullanıcının sorduğu soruya doğrudan odaklan. ASLA kullanıcının hangi kitapları okuduğunu, okuma ilerlemesini, sayfa sayısını, "şu an okuduğunu" veya tamamlanmış/yarım kalmış eser listesini zikretme! Bunlar kişisel ve özeldir; bunları bağlam olarak kullanabilirsin ancak sohbet içerisinde asla teknik bir rapor gibi dile getirme.
-3. Akışkan Anlatım ve Anlam Bütünlüğü: Paragraflar arasında kopukluk olmasın, birbirini mantıksal bir silsile ile takip eden, okuması zevkli, edebi bir bütünlük arz eden paragraflar kur.
-4. Kapsamlı Bilgi Kaynağı: Kütüphanedeki tüm kitaplara, şiirlere ve müfredata tam hakimsin. Kullanıcının sorgusuyla ilgili geniş bir yelpazeden (tüm kütüphane, müfredat, şiirler) alıntı ve referanslar yap.
-5. Sesli İletişime Uygun Akıcı Türkçe: Sesli dinlendiğin için sıcak, bilge, neşeli ve akıcı bir Türkçe ile konuş.
-
-[Okur Bağlamı ve Vektör Arama Özeti]:
-${ragContextText}
-`;
-
-      const trimmedHistory = (history || []).slice(-20);
-
-      const contents = [
-        ...trimmedHistory.map((m: any) => ({
-          role: m.role === 'user' ? 'user' : 'model',
-          parts: [{ text: m.text || m.parts?.[0]?.text || '' }]
-        })),
-        { 
-          role: 'user', 
-          parts: [{ text: message }] 
-        }
-      ];
-
-      let response;
-      // gemini-3.1-flash-lite is operational, fast, and has active free-tier quota
-      const modelsToTry = [
-        'gemini-3.1-flash-lite',
-        'gemini-2.5-flash-lite',
-        'gemini-2.0-flash-lite',
-        'gemini-2.5-flash',
-        'gemini-flash-latest',
-        'gemini-3.8-flash'
-      ];
-      let lastError: any = null;
+      const { message, mode, history, userContext, densePromptContext, userSummary } = req.body;
+      const normalizedMode = normalizeRobiMode(mode);
+      const archive = densePromptContext || (typeof userContext === 'string' ? userContext : JSON.stringify(userContext || {}));
       const currentApiKey = process.env.GEMINI_API_KEY || '';
-      const currentAi = getGenAI();
+      const currentAi = currentApiKey ? getGenAI() : undefined;
 
-      if (currentApiKey) {
-        for (const m of modelsToTry) {
-          // Attempt direct generation first for fast, reliable, substantive response
-          try {
-            response = await currentAi.models.generateContent({
-              model: m,
-              contents: contents,
-              config: {
-                systemInstruction,
-                temperature: 0.8
-              }
-            });
-            if (response && response.text) {
-              console.log(`[Gemini Success Direct] Model: ${m}`);
-              break;
-            }
-          } catch (modelErr: any) {
-            console.warn(`[Gemini Direct Error] ${m}:`, modelErr?.status, modelErr?.message?.substring(0, 120));
-            lastError = modelErr;
-          }
-        }
-      }
+      // Enrich with Google Books live lookup when non-URL mode
+      const googleBooksContext = normalizedMode === 'source'
+        ? ''
+        : await fetchGoogleBooksContext(String(message || ''));
 
-      if (response && response.text) {
-        return res.json({ reply: response.text });
-      }
-
-      // Seamless fallback to intelligent encyclopedic persona with rich domain knowledge
-      const dynamicReply = generateDynamicRobiFallback(message, userContext || userSummary, densePromptContext, history);
-      return res.json({ 
-        reply: dynamicReply,
-        isFallback: true
+      const result = await generateRobiChat(currentAi, {
+        message: String(message || ''),
+        mode: normalizedMode,
+        history,
+        archive,
+        googleBooksContext,
+        summary: userContext || userSummary
       });
 
+      return res.json(result);
     } catch (err: any) {
       console.warn("AI Chat Error intercepted:", err?.message || err);
-      const dynamicReply = generateDynamicRobiFallback(req.body?.message, req.body?.userContext || req.body?.userSummary, req.body?.densePromptContext, req.body?.history);
+      const dynamicReply = generateDynamicRobiFallback(
+        req.body?.message,
+        req.body?.userContext || req.body?.userSummary,
+        req.body?.densePromptContext,
+        req.body?.history
+      );
       return res.json({ reply: dynamicReply, isFallback: true });
     }
   });
@@ -573,25 +556,25 @@ ${ragContextText}
       const progPercent = Math.round((currentPage / Math.max(1, totalPages)) * 100);
 
       const prompt = `Sen yüksek derecede entelektüel, felsefi ve edebi derinliğe sahip doçent seviyesinde bir kitap ve medeniyet tahlilcisisin.
-Kullanıcının okuduğu eser bilgileri:
+İncelenen eser bilgileri:
 - Eser Adı: ${title}
 - Yazar: ${author}
 - Ana Kategori: ${category || 'Edebiyat ve Tefekkür'}
 - Eser Özeti/Konusu: ${description || 'Eser konuları'}
-- Şu Anki Okuma Konumu: Sayfa ${currentPage || 1} / ${totalPages || 200} (%${progPercent} İlerleme)
-${userNotes ? `- Okurun Notu/Alıntısı: "${userNotes}"` : ''}
+- İncelenen Konum: Sayfa ${currentPage || 1} / ${totalPages || 200} (%${progPercent})
+${userNotes ? `- Not/Alıntı: "${userNotes}"` : ''}
 
-Lütfen okurun bulunduğu bu sayfa ve bölüm aşamasına dair derinlikli, edebi ve felsefi bir "Bölüm & İlerleme Analizi" hazırla.
+Lütfen bu aşamaya dair derinlikli, edebi ve felsefi bir "Bölüm & İlerleme Analizi" hazırla.
 Çıktıyı kesinlikle geçerli bir JSON nesnesi olarak döndür:
 {
   "sectionTitle": "Bölümün Temel Felsefi & Edebi Aksı",
   "keyThemes": ["Tema 1", "Tema 2", "Tema 3"],
-  "literaryAnalysis": "Sayfa ve bölüm tahlilini içeren 2-3 paragraflık entelektüel değerlendirme...",
-  "reflectionQuestion": "Okurun bu sayfada düşüneceği derin tefekkür sorusu",
+  "literaryAnalysis": "Anlam bütünlüğü güçlü 2-3 paragraflık entelektüel değerlendirme...",
+  "reflectionQuestion": "Derin tefekkür sorusu",
   "recommendedParallelReads": ["Paralel Eser 1 (Yazar)", "Paralel Eser 2 (Yazar)"]
 }`;
 
-      const modelsToTry = ['gemini-3.1-flash-lite', 'gemini-2.5-flash-lite'];
+      const modelsToTry = ['gemini-4-hydrogen', 'gemini-3.1-flash-lite'];
       let resultText = '';
       const currentAi = getGenAI();
 
@@ -601,11 +584,12 @@ Lütfen okurun bulunduğu bu sayfa ve bölüm aşamasına dair derinlikli, edebi
             model: m,
             contents: prompt,
             config: {
-              responseMimeType: "application/json"
+              responseMimeType: "application/json",
+              httpOptions: { timeout: 15000, retryOptions: { attempts: 1 } }
             }
           });
           
-          const timeoutPromise = new Promise<null>((resolve) => setTimeout(() => resolve(null), 1800));
+          const timeoutPromise = new Promise<null>((resolve) => setTimeout(() => resolve(null), 15000));
           const resp = await Promise.race([apiCall, timeoutPromise]);
 
           if (resp && (resp as any).text) {
@@ -618,15 +602,14 @@ Lütfen okurun bulunduğu bu sayfa ve bölüm aşamasına dair derinlikli, edebi
       }
 
       if (resultText) {
-        const parsed = JSON.parse(resultText);
+        const parsed = safeParseJsonObject(resultText);
         return res.json(parsed);
       }
 
-      // Fast, rich personalized fallback
       return res.json({
         sectionTitle: `"${title}" — Sayfa ${currentPage} Felsefi & Edebi Tahlili`,
         keyThemes: [category || "Edebi Derinlik", "İnsan ve Zaman", "Felsefi Tefekkür"],
-        literaryAnalysis: `"${title}" eserinin ${currentPage}. sayfadaki bu aşaması, ${author}'ın üslubundaki edebi katmanları ve felsefi arka planı görünür kılar. Okuma serüveninizin %${progPercent}'lik bu evresinde yazar, karakterlerin içsel derinliklerini ve toplumsal/zamansal çatışmaları açığa çıkarmaktadır.\n\nEserin bu bölümü, okurun kendi hayat tecrübeleriyle metin arasında hikmetli bir düşünce köprüsü inşa eder.`,
+        literaryAnalysis: `"${title}" eserinin ${currentPage}. sayfadaki bu aşaması, ${author}'ın üslubundaki edebi katmanları ve felsefi arka planı görünür kılar. Yazar bu bölümde karakterlerin içsel derinliklerini ve dönemin zihniyet çatışmalarını incelikle açığa çıkarmaktadır.\n\nEserin bu evresi, okurun kendi hayat tecrübeleriyle metin arasında hikmetli bir düşünce köprüsü inşa eder.`,
         reflectionQuestion: `Yazarın bu bölümdeki ana düşüncesi zihninizde nasıl bir tefekkür ve ilham kapısı açıyor?`,
         recommendedParallelReads: [
           `Saatleri Ayarlama Enstitüsü (Ahmet Hamdi Tanpınar)`,

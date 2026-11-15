@@ -16,7 +16,9 @@ import { GlobalAddModals } from './components/GlobalAddModals';
 import { PWAInstallButton } from './components/PWAInstallButton';
 import { OfflineIndicator } from './components/OfflineIndicator';
 import { BookDetailModal } from './components/BookDetailModal';
+import { CoverManagerModal } from './components/CoverManagerModal';
 import { StandaloneWidgetView } from './components/StandaloneWidgetView';
+import { WidgetView } from './components/WidgetView';
 import { MainTab } from './types';
 
 
@@ -50,6 +52,7 @@ function MainAppContent() {
   } = useApp();
 
   const [isAddMenuOpen, setIsAddMenuOpen] = React.useState(false);
+  const [isCoverManagerOpen, setIsCoverManagerOpen] = React.useState(false);
 
   return (
     <div className="min-h-screen bg-[#F8F5EF] dark:bg-[#141414] text-slate-800 dark:text-slate-100 flex flex-col selection:bg-[#742C3C] selection:text-white pb-24">
@@ -259,7 +262,13 @@ function MainAppContent() {
       <BookDetailModal 
         book={selectedBookForDetail}
         onClose={() => setSelectedBookForDetail(null)}
-        onOpenCoverManager={() => {}}
+        onOpenCoverManager={() => setIsCoverManagerOpen(true)}
+      />
+
+      {/* Global Cover Manager Modal */}
+      <CoverManagerModal
+        isOpen={isCoverManagerOpen}
+        onClose={() => setIsCoverManagerOpen(false)}
       />
 
       {/* Offline Status Notice */}
@@ -356,8 +365,6 @@ function MainAppContent() {
     </div>
   );
 }
-
-import { WidgetView } from './components/WidgetView';
 
 export default function App() {
   const isWidget = typeof window !== 'undefined' && (

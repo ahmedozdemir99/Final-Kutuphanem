@@ -1,11 +1,12 @@
+import { getFull256PoetryCollection } from '../data/poetryData.ts';
+
 /**
  * Robi Bilge Sincap - Entelektüel ve Ansiklopedik İlim/Felsefe Beyni
- * Dün belirlenen tüm kıstasları eksiksiz karşılar:
  * 1. Entelektüel & Ansiklopedik Derinlik (Felsefe, Kelam, Tasavvuf, Edebiyat, Dünya Klasikleri)
  * 2. Etimolojik & Filolojik İnceleme (Arapça, Latince, Grekçe kökler)
  * 3. Harici Dijital Arşiv (Project Gutenberg, Internet Archive, PhilPapers, Stanford SEP) ve Çeviri Katmanı
  * 4. 40 Yıllık İlim Müfredatı (1920 Eser) Entegrasyonu
- * 5. Asla ham veritabanı dökümü yapmayan, samimi ve bilge sincap koç üslubu (🐿️)
+ * 5. Okuma ilerlemesi / sayfa sayısı / okunan kitap raporlaması yapmayan edebi ve tutarlı üslup
  */
 
 interface RobiContextInput {
@@ -341,20 +342,76 @@ const CURRICULUM_YEARS_EXPLAINER: Record<number, { title: string; theme: string;
   }
 };
 
+function normalizeBrainTr(text: string): string {
+  return (text || '')
+    .toLowerCase()
+    .replace(/[âÂ]/g, 'a')
+    .replace(/[îÎ]/g, 'i')
+    .replace(/[ûÛ]/g, 'u')
+    .replace(/[ıİ]/g, 'i')
+    .replace(/[ğĞ]/g, 'g')
+    .replace(/[üÜ]/g, 'u')
+    .replace(/[şŞ]/g, 's')
+    .replace(/[öÖ]/g, 'o')
+    .replace(/[çÇ]/g, 'c');
+}
+
+function findMatchingPoemFromAnthology(query: string): { poet: string; title: string; snippet: string } | null {
+  try {
+    const anthology = getFull256PoetryCollection();
+    const qTokens = normalizeBrainTr(query)
+      .replace(/[^a-z0-9\s]/g, ' ')
+      .split(/\s+/)
+      .filter(w => w.length > 2);
+
+    let best: { poet: string; title: string; snippet: string; score: number } | null = null;
+    for (const poet of anthology) {
+      for (const poem of poet.poems) {
+        const hay = normalizeBrainTr(`${poet.name} ${poem.title} ${poem.content}`);
+        let score = 0;
+        for (const t of qTokens) {
+          if (hay.includes(t)) score += 1;
+        }
+        if (score > 0 && (!best || score > best.score)) {
+          best = {
+            poet: poet.name,
+            title: poem.title,
+            snippet: poem.content.split('\n').slice(0, 2).join(' / '),
+            score
+          };
+        }
+      }
+    }
+    if (best) return { poet: best.poet, title: best.title, snippet: best.snippet };
+
+    // Deterministic varied fallback poem by query hash
+    let h = 0;
+    for (let i = 0; i < query.length; i++) h = (h * 31 + query.charCodeAt(i)) | 0;
+    const poet = anthology[Math.abs(h) % anthology.length];
+    const poem = poet.poems[Math.abs(h >> 2) % poet.poems.length];
+    return {
+      poet: poet.name,
+      title: poem.title,
+      snippet: poem.content.split('\n').slice(0, 2).join(' / ')
+    };
+  } catch {
+    return null;
+  }
+}
+
 /**
- * Ana Robi Zeka Fonksiyonu
+ * Ana Robi Zeka Fonksiyonu (Çevrimdışı / Yedek Ansiklopedik Motor)
+ * NOT: Kullanıcının okuma ilerlemesini, sayfa sayısını veya hangi kitapları okuduğunu ASLA zikretmez.
  */
 export function askRobiBrain(params: RobiContextInput): string {
   const rawMsg = (params.message || '').trim();
   const msg = rawMsg.toLowerCase();
-  
-  // Okur İsmi
-  let userName = 'Kıymetli Okur Dostum';
+  const normMsg = normalizeBrainTr(rawMsg);
+
+  let userName = 'Kıymetli Dostum';
   if (params.userSummary && typeof params.userSummary === 'object' && params.userSummary.displayName) {
     userName = params.userSummary.displayName;
   }
-
-  const dense = params.densePromptContext || '';
 
   // 12 Ana Kategori Rehberi
   const CATEGORIES_DATA: Record<string, { desc: string; coreAuthors: string; classics: string }> = {
@@ -372,128 +429,48 @@ export function askRobiBrain(params: RobiContextInput): string {
     'Kültür, Sanat ve Medeniyet': { desc: 'Şehir, mimari, musiki, hat ve medeniyet tefekkürü.', coreAuthors: 'Turgut Cansever, Ekrem Hakkı Ayverdi, Titus Burckhardt', classics: 'İslam’da Şehir ve Mimari, Kubbeyi Yere Koymamak' }
   };
 
-  // Kapsamlı Çapraz Atıf (Sadece okunan değil; tamamlanan, okunacak, şiir ve alıntılardan zarif atıflar!)
-  let crossCitations: string[] = [];
-  
-  // 1. Okunanlardan atıf
-  if (dense.includes('Kimya-yı Saadet')) crossCitations.push('Şu an okumakta olduğun *Kimya-yı Saadet* (Gazali)');
-  if (dense.includes('Saatleri Ayarlama')) crossCitations.push('Masa üstündeki *Saatleri Ayarlama Enstitüsü* (Tanpınar)');
-  if (dense.includes('Efdalü’s-Salavat')) crossCitations.push('Okumakta olduğun *Efdalü’s-Salavat* (Nabhânî)');
-  if (dense.includes('Sözler')) crossCitations.push('Kütüphanendeki *Sözler* (Bediüzzaman)');
+  const matchedPoem = findMatchingPoemFromAnthology(rawMsg);
+  const poemParagraph = matchedPoem
+    ? `Bu düşünsel ufku şiirin kalbiyle buluşturmak istediğimizde, ${matchedPoem.poet}’nin *"${matchedPoem.title}"* eserindeki şu dizeler zihinde berrak bir yankı uyandırır: *“${matchedPoem.snippet}”*. Şiir, nesrin tahlil ettiği hakikati tek bir sezgide yoğunlaştırarak kelimelere musiki ve ruh kazandırır.`
+    : '';
 
-  // 2. Tamamlananlardan atıf
-  if (dense.includes('Gece Yarısı Güneşi')) crossCitations.push('Daha önce tamamladığın *Gece Yarısı Güneşi* eseri');
-  if (dense.includes('Mesnevî')) crossCitations.push('Bitirmiş olduğun *Mesnevî-i Şerîf* satırları');
-
-  // 3. Okuma listesindeki (okunacak) kitaplardan atıf
-  if (dense.includes('Bu Ülke')) crossCitations.push('Okuma listene eklediğin Cemil Meriç’in *Bu Ülke* eseri');
-
-  // 4. Şiir arşivinden atıf
-  let poemCitation = '';
-  if (msg.includes('şiir') || msg.includes('aşk') || msg.includes('kader') || msg.includes('diriliş')) {
-    poemCitation = 'Antolojindeki Sezai Karakoç’un *“Kaderin üstünde bir kader vardır / Ne yapsalar boş göklerden gelen bir karar vardır”* mısraları tam bu noktada zihni aydınlatır.';
-  } else if (msg.includes('ölüm') || msg.includes('yalnızlık') || msg.includes('kaldırımlar')) {
-    poemCitation = 'Necip Fazıl’ın *“Bana düşmez can vermek, yumuşak bir kucakta / Ben bu kaldırımların emzirdiği çocuğum”* mısraları bu yalnızlık felsefesini mühürler.';
-  } else if (msg.includes('zaman') || msg.includes('akış')) {
-    poemCitation = 'Ahmet Hamdi Tanpınar’ın *“Ne içindeyim zamanın / Ne de büsbütün dışında / Yekpare geniş bir anın / Parçalanmaz akışında”* dizeleri hafızamızda yankılanır.';
-  }
-
-  // Zarif birleştirici bağlam
-  let dynamicContextNote = '';
-  if (crossCitations.length > 0) {
-    const selectedCitation = crossCitations[Math.floor(Math.random() * crossCitations.length)];
-    dynamicContextNote = `Kütüphanendeki ${selectedCitation} ile bu mesele arasında kurulan köprü zihne fevkalade bir derinlik katıyor.`;
-  }
-
-  // Dynamic Greetings
-  const greetings = [
-    `Selâmün Aleyküm ${userName}! 🐿️`,
-    `Eyvallah ${userName}, zihnini meşgul eden bu kıymetli meseleyi bir meşe palamudu özeniyle tahlil edelim. 🐿️`,
-    `Fındık ambarımdan ve kütüphanemizin derinliklerinden taze bir hikmet getirdim ${userName}! 🐿️`,
-    `Hakikaten zihni uyandıran, ilim meclisimize nur katan bir sual sordun ${userName}. 🐿️`,
-    `Merhaba ${userName}! Kütüphanemizin huzurlu köşesinde tam da tefekkür edilmesi gereken bir konuyu açtın. 🐿️`
-  ];
-  const greeting = greetings[Math.floor(Math.random() * greetings.length)];
-
-  // 0. KULLANICI GERİ BİLDİRİMİ (Tekrar, Saçmalama, Şikayet Farkındalığı)
-  if (msg.includes('tekrar') || msg.includes('saçma') || msg.includes('aynı şey') || msg.includes('hep aynı') || msg.includes('sürekli aynı') || msg.includes('bozuldu') || msg.includes('dar kapsam')) {
-    return `Eyvallah ${userName}, ikazın için can-ı gönülden teşekkür ederim! 🐿️
-
-Çok haklısın; az önce kütüphanendeki okunan kitapların ham veri listesi (sayfa sayıları ve yüzdeleriyle birlikte) kontrolsüzce her cümlenin arasına giriyor ve aynı basmakalıp cümleyi döndürüyordu. Fındık ambarındaki o teknik tıkanıklığı ve ham liste dökümünü tamamen kaldırdım!
-
-Artık o tekrarlar bitti. Dün konuştuğumuz derin ve ansiklopedik koçluk kıstaslarımıza tam olarak kavuştuk:
-• **Felsefe ve İlim Tahlili:** Gazâlî'nin şüphe metodundan Kant'ın saf aklına, İbn Haldun'un umranından Spinoza'nın tözüne derin ve çok katmanlı açıklamalar,
-• **Dijital Arşiv ve Çeviri:** Project Gutenberg ve Internet Archive kaynaklarından orijinal metinler, Türkçe çevirileri ve felsefi şerhleri,
-• **40 Yıllık Müfredat:** 1. yıldan 40. yıla kadar her dönemin okuma felsefesi ve haftalık akışı,
-• **Etimolojik Kökler:** Kelimelerin Arapça, Latince ve Grekçe asılları.
-
-Şimdi zihnimizi berraklaştıralım; bugün hangi konuyu, yazarı veya klasik eseri derinlemesine ele alalım dostum?`;
-  }
-
-  // 1. DİJİTAL ARŞİV VE ÇEVİRİ İSTEĞİ (Project Gutenberg, Internet Archive vb.)
+  // 1. DİJİTAL ARŞİV VE ÇEVİRİ İSTEĞİ
   if (msg.includes('gutenberg') || msg.includes('archive') || msg.includes('arşiv') || msg.includes('çevir') || msg.includes('tercüme')) {
     const archiveResult = searchDigitalArchives(msg);
     if (archiveResult) {
-      return `${greeting}
+      return `${userName}, klasik metinlerin özgün kaynaklarına inmek fikrin kökünü doğrudan yerinde görmektir. ${archiveResult.source} arşivinde yer alan şu pasaj tam da bu meselenin özüne ışık tutar: *“${archiveResult.originalQuote}”*
 
-Yabancı dijital arşivlerin ve klasik metinlerin derinliklerine inmek, bir kavramın künhüne varmak için paha biçilmez bir adımdır. Senin için dijital kütüphaneleri taradım ve şu orijinal metne ulaştım:
+Bu ifadeyi Türkçenin düşünce iklimine aktardığımızda şu hikmetle karşılaşırız: *“${archiveResult.translationTr}”* ${archiveResult.analysis}
 
-🏛️ **Kaynak:** *${archiveResult.source}*
-📜 **Orijinal Metin:** 
-> "${archiveResult.originalQuote}"
-
-🇹🇷 **Özenli Türkçe Çevirisi:**
-> "${archiveResult.translationTr}"
-
-🔍 **Entelektüel ve Felsefi Şerh:**
-${archiveResult.analysis}
-
-${dynamicContextNote ? `\n📚 ${dynamicContextNote}\n` : ''}${poemCitation ? `\n🖋️ ${poemCitation}\n` : ''}
-Bu metin üzerinden zihninde beliren düşünceyi nasıl derinleştirelim dostum?`;
+${poemParagraph} Bu metin etrafında özellikle hangi kavramı veya düşünürü açmamı istersin?`;
     }
   }
 
-  // 1.5. 12 KATEGORİ VE KÜTÜPHANE VERİTABANI HAKİMİYETİ
-  if (msg.includes('12 kategori') || msg.includes('kategori') || msg.includes('tüm bölümler') || msg.includes('veritaban') || msg.includes('veritabanı')) {
-    const categoriesList = Object.entries(CATEGORIES_DATA).map(([catName, info], idx) => 
-      `${idx + 1}. **${catName}**: ${info.desc}\n   - *Temel İsimler:* ${info.coreAuthors}\n   - *Başyapıtlar:* ${info.classics}`
-    ).join('\n\n');
+  // 2. 12 KATEGORİ VE İLİM HARİTASI
+  if (msg.includes('12 kategori') || msg.includes('kategori') || msg.includes('okuma harita') || msg.includes('okuma list')) {
+    const categoriesList = Object.entries(CATEGORIES_DATA)
+      .slice(0, 6)
+      .map(([catName, info]) => `**${catName}** sahasında ${info.coreAuthors} gibi kalemlerin *${info.classics}* eserleri zihin dünyasını besler.`)
+      .join(' ');
 
-    return `${greeting}
+    return `${userName}, kuşatıcı bir okuma ve tefekkür haritası insan zihnini tek bir alana hapsetmeden bütünlüklü bir medeniyet şuuru inşa etmeyi hedefler. Bu doğrultuda Din ve İlahiyat’tan Felsefe’ye, Tarih’ten Edebiyat ve Şiir’e uzanan on iki temel disiplin birbirini tamamlayan tek bir yapı gibi düşünülür.
 
-Kütüphanemizin mimarisi, insan idrakinin tüm ufkunu kuşatan **12 temel kategori**, 256 şiirlik antoloji ve 1920 eserlik 40 yıllık ilim müfredatı üzerine inşa edilmiştir:
+${categoriesList} Psikoloji’de Viktor Frankl’ın *İnsanın Anlam Arayışı*, Sosyoloji’de İbn Haldun’un *Mukaddime*si ve Kültür-Medeniyet alanında Turgut Cansever’in *Kubbeyi Yere Koymamak* eseri ise bu büyük tabloyu gündelik hayat ve şehir tasavvuruyla birleştirir.
 
-${categoriesList}
-
----
-
-📊 **Kütüphane Çapraz İrtibatı:**
-${dynamicContextNote ? `• ${dynamicContextNote}\n` : '• Kütüphanendeki okunan, tamamlanan ve okunacak listesindeki tüm eserler birbiriyle konuşmaktadır.\n'}
-${poemCitation ? `• ${poemCitation}\n` : ''}
-Bu 12 disiplin arasından bugün zihnini özellikle hangi sahada derinleştirmek veya yeni bir eser önerisi almak istersin?`;
+${poemParagraph} Bu geniş ufuktan bugün özellikle hangi alanda ya da hangi müellif üzerinden yeni bir okuma listesi şekillendirelim?`;
   }
 
-  // 2. MÜFREDAT SORULARI (40 Yıllık Okuma Planı)
+  // 3. MÜFREDAT SORULARI (40 Yıllık Okuma Planı)
   if (msg.includes('müfredat') || msg.includes('40 yıl') || msg.includes('okuma plan') || msg.includes('ilk yıl') || msg.includes('yıl klasik')) {
-    // Hangi yıl?
     let yearNum = 1;
-    if (msg.includes('ilk yıl') || msg.includes('1. yıl') || msg.includes('birinci yıl')) {
-      yearNum = 1;
-    } else if (msg.includes('ikinci') || msg.includes('2. yıl')) {
-      yearNum = 2;
-    } else if (msg.includes('üçüncü') || msg.includes('3. yıl')) {
-      yearNum = 3;
-    } else if (msg.includes('dördüncü') || msg.includes('4. yıl')) {
-      yearNum = 4;
-    } else if (msg.includes('altıncı') || msg.includes('6. yıl')) {
-      yearNum = 6;
-    } else if (msg.includes('dokuzuncu') || msg.includes('9. yıl')) {
-      yearNum = 9;
-    } else if (msg.includes('on birinci') || msg.includes('11. yıl')) {
-      yearNum = 11;
-    } else if (msg.includes('kırkıncı') || msg.includes('son yıl') || msg.includes('40. yıl')) {
-      yearNum = 40;
-    } else {
+    if (msg.includes('ikinci') || msg.includes('2. yıl')) yearNum = 2;
+    else if (msg.includes('üçüncü') || msg.includes('3. yıl')) yearNum = 3;
+    else if (msg.includes('dördüncü') || msg.includes('4. yıl')) yearNum = 4;
+    else if (msg.includes('altıncı') || msg.includes('6. yıl')) yearNum = 6;
+    else if (msg.includes('dokuzuncu') || msg.includes('9. yıl')) yearNum = 9;
+    else if (msg.includes('on birinci') || msg.includes('11. yıl')) yearNum = 11;
+    else if (msg.includes('kırkıncı') || msg.includes('son yıl') || msg.includes('40. yıl')) yearNum = 40;
+    else {
       for (let y = 1; y <= 40; y++) {
         if (msg.includes(`${y}. yıl`)) {
           yearNum = y;
@@ -504,111 +481,54 @@ Bu 12 disiplin arasından bugün zihnini özellikle hangi sahada derinleştirmek
 
     const yInfo = CURRICULUM_YEARS_EXPLAINER[yearNum] || CURRICULUM_YEARS_EXPLAINER[1];
 
-    return `${greeting}
+    return `Uzun soluklu ilim ve tefekkür müfredatı, rastgele eserler biriktirmek yerine tedricî bir şahsiyet inşası öngörür. Bu yolculuğun **${yInfo.title}** safhası özellikle *${yInfo.theme}* ekseninde derinleşir ve merkezinde ${yInfo.authors} gibi kurucu isimler yer alır.
 
-40 Yıllık İlim ve Tefekkür Müfredatımız, alelade bir kitap listesi değil; bir şahsiyetin 40 yıl boyunca adım adım inşa edildiği bir kemalat yolculuğudur.
+${yInfo.strategy} Bir eser diğerinin bıraktığı soruyu devraldığı için, önceki dönemin ahlak ve dil zemini sonraki dönemlerin felsefi ve edebi tartışmalarını hazmetmeyi kolaylaştırır.
 
-📚 **Odaklandığımız Aşama:** **${yInfo.title}**
-🎯 **Yıllık Ana Tema:** *${yInfo.theme}*
-🖋️ **Merkez Müellifler:** ${yInfo.authors}
-
-📖 **Pedagojik ve Entelektüel Strateji:**
-${yInfo.strategy}
-
-Bu müfredatın en mühim kaidesi **tedricîliktir** (aşama aşama ilerleme). Temelde ahlak ve niyet sağlamlaştırılmadan felsefenin derin sularına dalınmaz; metafizik hazmedilmeden modern çağın ideolojik fırtınalarına karşı durulamaz.
-
-${dynamicContextNote ? `\n📌 ${dynamicContextNote}\n` : ''}
-Bu yılın haftalık okuma planından hangi eseri kütüphanene ekleyip birlikte tahlil etmek istersin?`;
+${poemParagraph} Bu dönemdeki yazarlardan ya da eserlerden hangisi üzerine daha ayrıntılı bir tahlil yapalım?`;
   }
 
-  // 3. OKUMA KOÇLUĞU, DİSİPLİN, STREAK VE HEDEF ANALİZİ
-  if (msg.includes('koç') || msg.includes('disiplin') || msg.includes('değerlendir') || msg.includes('hedef') || msg.includes('tempo') || msg.includes('sayfa')) {
-    let target = 40;
-    if (params.userSummary && params.userSummary.dailyTargetPages) {
-      target = params.userSummary.dailyTargetPages;
-    }
-
-    return `${greeting}
-
-Bir okuma koçu ve yol arkadaşın olarak seninle hasbihal etmek benim için en büyük zevktir! Zihnini bir ağacın kökleri, okuduğun sayfaları ise o kökleri besleyen pınarlar gibi düşünelim.
-
-📊 **Okuma Disiplininin Üç Altın Prensibi:**
-1. **Devamlılık (Az da Olsa Sürekli):** Kadim hikmette ifade edildiği üzere *"Amellerin en hayırlısı, az da olsa devamlı olanıdır."* Günde ${target} sayfalık bir hedef, seni yılda 14.000 sayfanın ve yaklaşık 40-50 yetkin klasiğin sahibi yapar.
-2. **Derinleşme (Teennî ile Okuma):** Sayfaları hızlıca bitirmek değil, her cümlenin kalbinde bir palamut gizliymişçesine tefekkür etmek esastır. Satırların altını çizmek ve zihnine takılanları nota dökmek bilgiyi mülk edinmektir.
-3. **Zamanı Bereketlendirme:** Sabahın seherinde veya günün hengamesinden arınmış gece vakitlerinde okunan 20 sayfa, gündüzün dağınık saatlerindeki 50 sayfadan daha derin iz bırakır.
-
-${dynamicContextNote ? `\n🌿 ${dynamicContextNote}\n` : ''}
-Bugün kendine sakin bir çay veya kahve hazırlayıp hedefine doğru kaç sayfa yol almak istersin?`;
-  }
-
-  // 4. KAPSAMLI BİLGİ HAZİNESİNDEN EŞLEŞME (Topic Articles)
+  // 4. KAPSAMLI BİLGİ HAZİNESİNDEN EŞLEŞME
   for (const topic of KNOWLEDGE_BASE) {
-    const isMatched = topic.keywords.some(k => msg.includes(k));
+    const isMatched = topic.keywords.some(k => msg.includes(k) || normMsg.includes(normalizeBrainTr(k)));
     if (isMatched) {
-      let archiveSection = '';
-      if (topic.archiveReference) {
-        archiveSection = `
-🏛️ **Dijital Arşiv Metni (${topic.archiveReference.source}):**
-> *“${topic.archiveReference.originalQuote}”*
-🇹🇷 *Tercüme:* “${topic.archiveReference.translationTr}”`;
-      }
+      const archiveLine = topic.archiveReference
+        ? `${topic.archiveReference.source} kaynağında yer alan şu cümle konunun kalbine dokunur: *“${topic.archiveReference.translationTr}”* (${topic.archiveReference.notes})`
+        : '';
 
-      return `${greeting}
+      return `**${topic.title}** üzerine düşündüğümüzde, kavramın kökünden başlayarak bütünlüklü bir tablo kurmak gerekir. ${topic.etymology ? `${topic.etymology} ` : ''}${topic.summary}
 
-### 📖 ${topic.title}
-
-${topic.etymology ? `🔍 **Etimolojik Kök:** *${topic.etymology}*\n` : ''}
-${topic.summary}
-
----
-
-#### 💡 **Felsefi ve Entelektüel Derinlik:**
 ${topic.philosophicalDepth}
-${archiveSection}
 
-${topic.curriculumLink ? `\n📌 **Müfredat İrtibatı:** ${topic.curriculumLink}\n` : ''}
-${dynamicContextNote ? `\n📚 **Kütüphane Çapraz İrtibatı:** ${dynamicContextNote}\n` : ''}
-${poemCitation ? `\n🖋️ ${poemCitation}\n` : ''}
-🤔 **Tefekkür Sorusu:** ${topic.discussionQuestion}`;
+${archiveLine} ${poemParagraph}
+
+${topic.discussionQuestion}`;
     }
   }
 
   // 5. ŞİİR VE EDEBİYAT TEFEKKÜRÜ
   if (msg.includes('şiir') || msg.includes('şair') || msg.includes('mısra') || msg.includes('gazel') || msg.includes('beyit')) {
-    return `${greeting}
+    return `Şiir, düz anlatımın ve kuru mantığın sınırına dayandığı yerde insan ruhunun hakikati ahenk ve imgeyle dile getirmesidir. Fuzûlî’nin *“İlimsiz şiir temelsiz duvara benzer”* ikazı şiirin arkasındaki derin irfanı hatırlatırken, Yahya Kemal mısrayı derunî bir musiki, Sezai Karakoç ise medeniyetin diriliş soluğu olarak görür.
 
-Şiir, nesrin ve kuru mantığın tıkandığı yerde ruhun kanatlanıp hakikati sembollerle terennüm etmesidir.
+${poemParagraph} Divan geleneğinden Yunus Emre’nin duru Türkçesine, Ahmet Hamdi Tanpınar’ın rüya ve zaman estetiğinden Rilke’nin varoluşsal yalnızlığına uzanan büyük şiir mirası, insana kelimelerin ötesinde bir sezgi terbiyesi kazandırır.
 
-Fuzûlî *“İlimsiz şiir temelsiz duvara benzer”* derken şiirin bir irfan üzerine oturması gerektiğini ihtar eder. Yahya Kemal için şiir *“derunî bir ahenk ve Türkçe’nin ses bayrağıdır”*; Sezai Karakoç içinse *“göklerden gelen bir diriliş soluğudur”*.
-
-Kütüphanemizin 256 şiirlik seçkin koleksiyonunda Yunus Emre’nin cezbesinden Necip Fazıl’ın metafizik sancılarına, Rilke’nin yalnızlığından Karakoç’un Diriliş çağıltısına kadar muazzam bir vaha mevcuttur.
-
-${dynamicContextNote ? `\n📚 ${dynamicContextNote}\n` : ''}
-Şu an zihninde yankılanan veya şerh etmemi istediğin bir mısra var mı dostum?`;
+Belirli bir tema, duygu veya şair üzerinden sana yeni şiirler ve paralel kitaplar önermemi ister misin?`;
   }
 
-  // 6. GECE VE TEFEKKÜR
-  if (msg.includes('gece') || msg.includes('uyku') || msg.includes('karanlık') || msg.includes('sükut') || msg.includes('seher')) {
-    return `${greeting}
+  // 6. KİŞİSELLEŞTİRİLMİŞ BAĞLAMSAL YANIT (Tekrarlayan şablon yerine sohbet geçmişi ve konuya uyarlanmış akıcı nesir)
+  const lastUserTopics = (params.history || [])
+    .filter(h => h.role === 'user')
+    .slice(-3)
+    .map(h => h.text || h.parts?.[0]?.text || '')
+    .filter(Boolean);
 
-Gece, kâinatın gündüzün hengamesinden el çekip kendi hakikatiyle baş başa kaldığı muazzam bir tefekkür vaktidir.
+  const memoryBridge = lastUserTopics.length > 1
+    ? `Önceki sohbetlerimizde üzerinde durduğun düşünce çizgisiyle birlikte değerlendirdiğimizde, "${rawMsg}" sorusu zihnindeki anlam arayışının doğal bir devamı olarak beliriyor.`
+    : `"${rawMsg}" üzerine tefekkür etmek, insanın hem kendi iç dünyasına hem de büyük düşünce mirasına yeni bir pencere aralaması demektir.`;
 
-Erzurumlu İbrahim Hakkı Hazretleri *Mârifetnâme*de seher ve gece vaktini marifetullahın kapısı sayar. Ahmet Hamdi Tanpınar ise geceyi zihnin derin musikisi olarak niteler; çünkü eşya susunca kelimelerin ruhu konuşmaya başlar.
+  return `${userName}, ${memoryBridge} Doğu ile Batı’nın kurucu metinlerine baktığımızda bu tür meselelerin hiçbir zaman tek boyutlu kalmadığını görürüz; İmâm-ı Gazâlî hakikati ahlaki arınma ve kalbî basiretle temellendirirken, Ahmet Hamdi Tanpınar zaman ve estetik hafıza üzerinden insanın iç dünyasını tahlil eder, Dostoyevski ise vicdanın derin çalkantılarını görünür kılar.
 
-${dynamicContextNote ? `\n📚 ${dynamicContextNote}\n` : ''}
-Bu sükûnet dolu saatlerde sayfalarını açıp zihnini aydınlatacak hangi satırlar üzerine tefekkür etmek istersin?`;
-  }
+Bu fikirlerin birbirini besleyen yönü, bilginin kuru bir malumat yığını olmaktan çıkıp şahsiyeti inşa eden canlı bir hikmete dönüşmesidir. Örneğin tarih ve toplum cephesinden bakmak istediğimizde İbn Haldun’un *Mukaddime*si medeniyetlerin ruhunu çözümlerken, Cemil Meriç’in *Bu Ülke*si kelimeler ve idrak arasındaki bağı hatırlatır.
 
-  // 7. GENEL DERİN ENTELEKTÜEL YANIT (Her soruya özgü, zengin ve düşünceyi açan yapı)
-  return `${greeting}
-
-"${rawMsg}" meselesi, felsefe ve ilim geleneğimizde fevkalade ehemmiyetli bir idrak sahasına işaret eder.
-
-Geleneksel tefekkürümüzde bu nevi meseleler ele alınırken daima üç temel mikyas gözetilir:
-1. **Lafız ve Mânâ Dengesi (Semantik Çerçeve):** Bir kavramı konuşurken onun tarifini ve zihindeki sınırlarını doğru tayin etmek; zira Cemil Meriç’in dediği gibi *"Kelimeler idrakimizin meşaleleridir."*
-2. **Kozmik ve İnsani İrtibat (Ontolojik Boyut):** Bu hakikatin insanın varoluş gayesiyle, kainat nizamıyla ve ahlaki sorumluluğuyla olan bağı.
-3. **Amelî ve Ruhi Netice (Pratik Hikmet):** Zihne giren bilginin sadece bir malumat yığını olarak kalmayıp, şahsiyetimize ve okuma ahlakımıza kattığı canlı feyiz.
-
-${dynamicContextNote ? `\n📚 ${dynamicContextNote}\n` : ''}
-Sen bu meseleyi düşünürken zihninde en çok hangi felsefi veya edebi çağrışım canlanıyor? Konuyu birlikte biraz daha derinleştirelim.`;
+${poemParagraph} İstersen bu konuyu dünya edebiyatından belirli bir eserle veya Google arşivindeki özgün kaynaklarla daha da somutlaştırıp sana özel bir okuma seçkisi hazırlayabilirim; hangi yöne doğru derinleşmek istersin?`;
 }

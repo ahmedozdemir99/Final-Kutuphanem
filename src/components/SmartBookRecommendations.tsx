@@ -3,6 +3,7 @@ import {
   Sparkles, BookOpen, RefreshCw, Plus, Check, ChevronRight, Compass, Flame, Lightbulb, BookmarkCheck, Trash2
 } from 'lucide-react';
 import { useApp } from '../context/AppContext';
+import { auth } from '../lib/firebase';
 import { BookCoverImage } from './BookCoverImage';
 import { DEFAULT_BOOK_COVERS } from '../data/catalogData';
 
@@ -59,7 +60,7 @@ export const SmartBookRecommendations: React.FC = () => {
   const { userBooks, userProfile, quotations, addBookToLibrary, deleteBookFromLibrary, setSelectedBookForDetail } = useApp();
 
   const [recommendations, setRecommendations] = useState<SmartRecommendation[]>(DEFAULT_INITIAL_RECOMMENDATIONS);
-  const [curatorNote, setCuratorNote] = useState<string>('Okuma ritminize, kütüphanenize ve yapay zekâ sohbetlerinize göre seçilen öneriler:');
+  const [curatorNote, setCuratorNote] = useState<string>('İlgi alanlarınıza, alıntılarınıza ve yapay zekâ sohbetlerinize göre seçilen öneriler:');
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [selectedFocus, setSelectedFocus] = useState<string>('all');
 
@@ -69,18 +70,24 @@ export const SmartBookRecommendations: React.FC = () => {
       const activeBooks = userBooks.map(b => ({
         title: b.title,
         author: b.author,
-        category: b.category,
-        status: b.status
+        category: b.category
       }));
 
       // Extract recent AI chat topics from localStorage for personalized grounding
       let chatTopics: string[] = [];
       try {
-        const chatHist = localStorage.getItem('dk_robi_chat_history') || localStorage.getItem('dk_chat_messages');
+        const uid = auth.currentUser?.uid || localStorage.getItem('dk_persistent_uid') || 'default';
+        const chatHist =
+          localStorage.getItem(`chat_history_${uid}`) ||
+          localStorage.getItem('dk_robi_chat_history') ||
+          localStorage.getItem('dk_chat_messages');
         if (chatHist) {
           const parsed = JSON.parse(chatHist);
           if (Array.isArray(parsed)) {
-            chatTopics = parsed.slice(-10).map((m: any) => typeof m === 'string' ? m : m.content || m.text || m.userPrompt || '').filter(Boolean);
+            chatTopics = parsed
+              .slice(-10)
+              .map((m: any) => typeof m === 'string' ? m : m.content || m.text || m.userPrompt || '')
+              .filter(Boolean);
           }
         }
       } catch {}
@@ -94,18 +101,18 @@ export const SmartBookRecommendations: React.FC = () => {
           dailyTarget: userProfile.dailyTargetPages || 40,
           chatTopics: chatTopics.slice(-6),
           userQuotations: (quotations || []).slice(-5).map(q => ({ quote: q.quoteText, book: q.bookTitle })),
-          mood: 'Okuma listesi, alıntılar ve yapay zeka sohbet konularına göre kişiselleştirilmiş entelektüel öneriler'
+          mood: 'Alıntılar, edebi merak ve yapay zeka sohbet konularına göre kişiselleştirilmiş entelektüel öneriler'
         })
       });
 
       if (!res.ok) throw new Error('API Hatası');
       const data = await res.json();
       setRecommendations(data.recommendations || []);
-      setCuratorNote(data.curatorNote || 'Okuma listeniz ve sohbet konularınıza göre seçilen akıllı öneriler:');
+      setCuratorNote(data.curatorNote || 'Edebi ilgi alanlarınıza ve sohbet konularınıza göre seçilen akıllı öneriler:');
     } catch (err) {
       console.warn('Smart recommendations fallback triggered', err);
       setRecommendations(DEFAULT_INITIAL_RECOMMENDATIONS);
-      setCuratorNote("Kütüphane okuma çizginize göre özenle seçilmiş akıllı okuma rotası:");
+      setCuratorNote("Fikir ve edebiyat dünyanıza göre özenle seçilmiş okuma rotası:");
     } finally {
       setIsLoading(false);
     }
@@ -182,7 +189,7 @@ export const SmartBookRecommendations: React.FC = () => {
             Akıllı Kitap Önerileri
           </h2>
           <p className="text-xs text-slate-600 dark:text-slate-400 mt-1">
-            Okuma listeniz, alıntılarınız ve AI sohbetlerinizdeki konulara göre size özel seçilen başyapıtlar.
+            Alıntılarınız, edebi ilginiz ve AI sohbetlerinizdeki konulara göre size özel seçilen başyapıtlar.
           </p>
         </div>
 
