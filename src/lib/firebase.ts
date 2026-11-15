@@ -1,6 +1,6 @@
 import { initializeApp } from 'firebase/app';
 import { getAuth, GoogleAuthProvider, signInWithPopup, signInAnonymously, signOut } from 'firebase/auth';
-import { doc, getDocFromServer, getFirestore, setLogLevel, disableNetwork } from 'firebase/firestore';
+import { doc, getDocFromServer, getFirestore, setLogLevel, disableNetwork, enableNetwork } from 'firebase/firestore';
 import firebaseConfig from '../../firebase-applet-config.json';
 
 // Silence verbose internal Firebase SDK warning logs during temporary quota exhaustion
@@ -14,6 +14,17 @@ export const googleProvider = new GoogleAuthProvider();
 
 export function handleQuotaExhaustion() {
   disableNetwork(db).catch(() => {});
+}
+
+export async function ensureFirestoreNetwork(): Promise<void> {
+  try {
+    await Promise.race([
+      enableNetwork(db),
+      new Promise<void>((resolve) => setTimeout(resolve, 2500))
+    ]);
+  } catch {
+    // Ignore network enable fallback errors
+  }
 }
 
 

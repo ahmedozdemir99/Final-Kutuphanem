@@ -30,6 +30,9 @@ export const ProfileView: React.FC = () => {
     storagePersisted,
     deduplicateBooks,
     cloudSyncStatus,
+    cloudSyncProgress,
+    cloudSyncStage,
+    lastCloudSyncAt,
     verifyDataIntegrity,
     userBooks,
     theme,
@@ -269,6 +272,25 @@ export const ProfileView: React.FC = () => {
 
   const [importProgress, setImportProgress] = useState<number>(0);
   const [syncProgress, setSyncProgress] = useState<number>(0);
+
+  const effectiveSyncProgress = isManualSyncing
+    ? Math.max(syncProgress, cloudSyncProgress)
+    : cloudSyncProgress;
+
+  const formattedLastSync = (() => {
+    if (!lastCloudSyncAt) return null;
+    try {
+      return new Intl.DateTimeFormat('tr-TR', {
+        day: '2-digit',
+        month: 'short',
+        year: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit'
+      }).format(new Date(lastCloudSyncAt));
+    } catch {
+      return null;
+    }
+  })();
 
   const handleRestoreBackup = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -658,7 +680,7 @@ export const ProfileView: React.FC = () => {
         {openSection === 'sync' && (
           <div className="p-6 pt-0 border-t border-black/5 dark:border-white/5 space-y-6 animate-in fade-in duration-200">
             {/* Cloud Status */}
-            <div className="p-4 rounded-2xl bg-[#F8F5EF] dark:bg-[#141414] border border-black/5 space-y-2 pt-4">
+            <div className="p-4 rounded-2xl bg-[#F8F5EF] dark:bg-[#141414] border border-black/5 space-y-3 pt-4">
               <div className="flex flex-wrap justify-between items-center gap-2">
                 <span className="text-xs font-semibold text-slate-700 dark:text-slate-300 flex items-center gap-2">
                   <Cloud className="w-4 h-4 text-[#742C3C] dark:text-[#B79A63]" />
@@ -670,11 +692,26 @@ export const ProfileView: React.FC = () => {
                   }`}>
                     {storagePersisted ? 'Tarayıcı Hafızası Korumalı ✓' : 'Standart Tarayıcı Hafızası'}
                   </span>
-                  <span className={`text-[11px] font-bold px-2.5 py-0.5 rounded-full ${
-                    isGoogleLinked && cloudSyncStatus === 'synced' ? 'bg-emerald-500/10 text-emerald-600' :
-                    cloudSyncStatus === 'syncing' ? 'bg-amber-500/10 text-amber-600' : 'bg-gray-500/10 text-gray-500'
+                  <span className={`text-[11px] font-bold px-2.5 py-0.5 rounded-full tabular-nums ${
+                    cloudSyncStatus === 'syncing'
+                      ? 'bg-amber-500/15 text-amber-700 dark:text-amber-300'
+                      : isGoogleLinked && cloudSyncStatus === 'synced'
+                        ? 'bg-emerald-500/10 text-emerald-600'
+                        : cloudSyncStatus === 'error'
+                          ? 'bg-rose-500/10 text-rose-600'
+                          : isGoogleLinked && cloudSyncStatus === 'offline'
+                            ? 'bg-amber-500/10 text-amber-600'
+                            : 'bg-gray-500/10 text-gray-500'
                   }`}>
-                    {isGoogleLinked && cloudSyncStatus === 'synced' ? 'Google Bulut Aktif' : cloudSyncStatus === 'syncing' ? 'Eşitleniyor...' : 'Yalnızca Cihazda'}
+                    {cloudSyncStatus === 'syncing'
+                      ? `Eşitleniyor... %${effectiveSyncProgress}`
+                      : isGoogleLinked && cloudSyncStatus === 'synced'
+                        ? 'Google Bulut Aktif'
+                        : cloudSyncStatus === 'error'
+                          ? 'Eşitleme Hatası'
+                          : isGoogleLinked && cloudSyncStatus === 'offline'
+                            ? 'Çevrimdışı / Kota Korumalı'
+                            : 'Yalnızca Cihazda'}
                   </span>
                 </div>
               </div>
@@ -684,44 +721,57 @@ export const ProfileView: React.FC = () => {
                   : 'Önemli: Google hesabınızı bağlamadan yüklenen yedekler yalnızca tarayıcı hafızasında tutulur ve Android/Chrome önbellek temizliği yaptığında birkaç gün sonra silinebilir. Kalıcı koruma için Google ile bağlanın.'}
               </p>
 
-              <div className="pt-2 flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-2">
-                <span className="text-[11px] text-slate-500">
-                  {isGoogleLinked ? `Bağlı hesap: ${currentUser?.email || userProfile.email}` : 'Kalıcı bulut koruması için Google ile bağlanın.'}
-                </span>
-                <div className="flex flex-wrap items-center gap-2">
+              <div className="pt-1 space-y-2.5">
+                <div className="flex flex-wrap items-center justify-between gap-1.5 text-[11px] text-slate-500">
+                  <span>
+                    {isGoogleLinked ? `Bağlı hesap: ${currentUser?.email || userProfile.email}` : 'Kalıcı bulut koruması için Google ile bağlanın.'}
+                  </span>
+                  {isGoogleLinked && (
+                    <span className="font-medium text-slate-600 dark:text-slate-400">
+                      {formattedLastSync ? `Son bulut eşitlemesi: ${formattedLastSync}` : 'Henüz bulut kaydı yok'}
+                    </span>
+                  )}
+                </div>
+                <div className={`grid grid-cols-1 ${isGoogleLinked ? 'sm:grid-cols-3' : 'sm:grid-cols-2'} gap-2.5 w-full`}>
                   <button
                     onClick={handleCleanDuplicates}
-                    className="px-3.5 py-2 rounded-xl bg-amber-600/90 text-white text-xs font-semibold hover:bg-amber-700 transition-colors flex items-center justify-center gap-1.5 shadow-sm active:scale-95"
+                    className="w-full min-h-[44px] px-3 py-2.5 rounded-xl bg-amber-600/90 text-white text-xs font-semibold hover:bg-amber-700 transition-colors flex items-center justify-center gap-1.5 shadow-sm active:scale-95 text-center"
                     title="Aynı başlık, yazar ve ciltteki mükerrer eserleri birleştir ve fazla kopyaları sil"
                   >
-                    <Sparkles className="w-3.5 h-3.5 text-amber-200" />
+                    <Sparkles className="w-3.5 h-3.5 shrink-0 text-amber-200" />
                     <span>Mükerrer Eserleri Temizle</span>
                   </button>
                   {isGoogleLinked ? (
                     <>
                       <button
                         onClick={handleManualSync}
-                        disabled={isManualSyncing}
-                        className="px-3.5 py-2 rounded-xl bg-[#742C3C] text-white text-xs font-semibold hover:bg-[#4B1E2B] transition-colors flex items-center justify-center gap-1.5 shadow-sm active:scale-95 disabled:opacity-80"
+                        disabled={isManualSyncing || cloudSyncStatus === 'syncing'}
+                        className="w-full min-h-[44px] px-3 py-2.5 rounded-xl bg-[#742C3C] text-white text-xs font-semibold hover:bg-[#4B1E2B] transition-colors flex items-center justify-center gap-1.5 shadow-sm active:scale-95 disabled:opacity-80 text-center"
                       >
-                        <RefreshCw className={`w-3.5 h-3.5 ${isManualSyncing ? 'animate-spin' : ''}`} />
-                        <span>{isManualSyncing ? `Buluta Aktarılıyor: %${syncProgress}` : 'Buluta Şimdi Senkronize Et'}</span>
+                        <RefreshCw className={`w-3.5 h-3.5 shrink-0 ${(isManualSyncing || cloudSyncStatus === 'syncing') && !isCloudRestoring ? 'animate-spin' : ''}`} />
+                        <span className="tabular-nums">
+                          {isManualSyncing || (cloudSyncStatus === 'syncing' && !isCloudRestoring)
+                            ? `Aktarılıyor: %${effectiveSyncProgress}`
+                            : 'Buluta Şimdi Senkronize Et'}
+                        </span>
                       </button>
                       <button
                         onClick={handleCloudRestore}
-                        disabled={isCloudRestoring}
-                        className="px-3.5 py-2 rounded-xl bg-emerald-700 text-white text-xs font-semibold hover:bg-emerald-800 transition-colors flex items-center justify-center gap-1.5 shadow-sm active:scale-95 disabled:opacity-80"
+                        disabled={isCloudRestoring || cloudSyncStatus === 'syncing'}
+                        className="w-full min-h-[44px] px-3 py-2.5 rounded-xl bg-emerald-700 text-white text-xs font-semibold hover:bg-emerald-800 transition-colors flex items-center justify-center gap-1.5 shadow-sm active:scale-95 disabled:opacity-80 text-center"
                       >
-                        <Download className={`w-3.5 h-3.5 ${isCloudRestoring ? 'animate-spin' : ''}`} />
-                        <span>{isCloudRestoring ? 'Geri Yükleniyor...' : 'Buluttan Geri Yükle'}</span>
+                        <Download className={`w-3.5 h-3.5 shrink-0 ${isCloudRestoring ? 'animate-spin' : ''}`} />
+                        <span className="tabular-nums">
+                          {isCloudRestoring ? `Geri Yükleniyor: %${effectiveSyncProgress}` : 'Buluttan Geri Yükle'}
+                        </span>
                       </button>
                     </>
                   ) : (
                     <button
                       onClick={handleGoogleAuth}
-                      className="px-3.5 py-2 rounded-xl bg-[#742C3C] text-white text-xs font-semibold hover:bg-[#4B1E2B] transition-colors flex items-center justify-center gap-1.5 shadow-sm active:scale-95"
+                      className="w-full min-h-[44px] px-3 py-2.5 rounded-xl bg-[#742C3C] text-white text-xs font-semibold hover:bg-[#4B1E2B] transition-colors flex items-center justify-center gap-1.5 shadow-sm active:scale-95 text-center"
                     >
-                      <LogIn className="w-3.5 h-3.5 text-[#B79A63]" />
+                      <LogIn className="w-3.5 h-3.5 shrink-0 text-[#B79A63]" />
                       <span>Google ile Bağlan ve Kalıcı Koru</span>
                     </button>
                   )}
@@ -741,17 +791,17 @@ export const ProfileView: React.FC = () => {
                 </div>
               )}
 
-              {/* Live Cloud Sync Progress Bar */}
-              {isManualSyncing && (
-                <div className="mt-2 space-y-1 animate-in fade-in">
-                  <div className="flex justify-between text-[11px] font-semibold text-slate-600 dark:text-slate-400">
-                    <span>Bulut Eşitleme İlerlemesi</span>
-                    <span className="text-[#742C3C] dark:text-[#B79A63]">%{syncProgress}</span>
+              {/* Live Cloud Sync Progress Bar (shown for both manual and background sync) */}
+              {(isManualSyncing || isCloudRestoring || cloudSyncStatus === 'syncing') && (
+                <div className="mt-2 space-y-1.5 animate-in fade-in">
+                  <div className="flex justify-between items-center text-[11px] font-semibold text-slate-600 dark:text-slate-400">
+                    <span>{cloudSyncStage || 'Bulut Eşitleme İlerlemesi'}</span>
+                    <span className="text-[#742C3C] dark:text-[#B79A63] tabular-nums">%{effectiveSyncProgress}</span>
                   </div>
                   <div className="w-full bg-gray-200 dark:bg-gray-800 h-2 rounded-full overflow-hidden">
                     <div 
                       className="bg-[#742C3C] dark:bg-[#B79A63] h-full rounded-full transition-all duration-300"
-                      style={{ width: `${syncProgress}%` }}
+                      style={{ width: `${Math.max(4, effectiveSyncProgress)}%` }}
                     />
                   </div>
                 </div>

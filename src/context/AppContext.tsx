@@ -1,10 +1,10 @@
 import React, { createContext, useContext, useState, useEffect, useRef } from 'react';
 import { onAuthStateChanged, User as FirebaseUser } from 'firebase/auth';
-import { doc, getDoc, setDoc, deleteDoc } from 'firebase/firestore';
+import { doc, getDoc, getDocFromServer, setDoc, deleteDoc } from 'firebase/firestore';
 import { BookReview, BookStatus, MainTab, Quotation, ReadingSession, UserBook, UserProfile, VocabularyItem, QuranProgress, AppNotification, Badge } from '../types';
 import { DEFAULT_USER_BOOKS, DEFAULT_BOOK_COVERS, MAIN_CATEGORIES, inferCategoryForBook } from '../data/catalogData';
 import { PERMANENT_BOOKS } from '../data/permanentBooks';
-import { auth, db, loginWithGoogle, handleFirestoreError, OperationType } from '../lib/firebase';
+import { auth, db, loginWithGoogle, handleFirestoreError, OperationType, ensureFirestoreNetwork } from '../lib/firebase';
 import { saveBookFileToIDB, getBookFileFromIDB, saveCoverToIDB, getCoverFromIDB, saveAppDataToIDB, getAppDataFromIDB, deleteBookDataFromIDB, requestPersistentStorage } from '../lib/indexedDb';
 import { validateBackupJSON, ValidationResult } from '../lib/jsonValidator';
 import { AVAILABLE_BADGES } from '../data/badgeData';
@@ -28,6 +28,9 @@ interface AppContextType {
   selectedBookForDetail: UserBook | null;
   setSelectedBookForDetail: (book: UserBook | null) => void;
   cloudSyncStatus: 'synced' | 'syncing' | 'offline' | 'error';
+  cloudSyncProgress: number;
+  cloudSyncStage: string;
+  lastCloudSyncAt: string | null;
   
   // Theme & Global Modals
   notifications: AppNotification[];
@@ -177,6 +180,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const [currentUser, setCurrentUser] = useState<FirebaseUser | null>(null);
   const [cloudSyncStatus, setCloudSyncStatus] = useState<'synced' | 'syncing' | 'offline' | 'error'>('offline');
+  const [cloudSyncProgress, setCloudSyncProgress] = useState<number>(0);
+  const [cloudSyncStage, setCloudSyncStage] = useState<string>('');
+  const [lastCloudSyncAt, setLastCloudSyncAt] = useState<string | null>(() => {
+    try {
+      return localStorage.getItem('dk_last_sync_iso');
+    } catch {
+      return null;
+    }
+  });
   const [isHydrated, setIsHydrated] = useState<boolean>(false);
   const [storagePersisted, setStoragePersisted] = useState<boolean>(false);
   const hasCheckedCloudRestoreRef = useRef<string | null>(null);
@@ -1642,6 +1654,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const isSyncingRef = React.useRef(false);
+  const syncStartedAtRef = React.useRef<number>(0);
+
+  const getUtf8ByteSize = (text: string): number => {
+    try {
+      return new TextEncoder().encode(text).length;
+    } catch {
+      return text.length * 2;
+    }
+  };
 
   // Extract compact snapshot containing only user progress/custom books + sessions/quotes/reviews/vocab/quran so the entire cloud backup fits in ONE Firestore write!
   const buildCompactCloudSnapshot = (
@@ -1727,13 +1748,23 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       userProfile?: UserProfile;
     }
   ): Promise<{ success: boolean; message: string }> => {
-    if (isSyncingRef.current) {
-      return { 
-        success: true, 
-        message: `✅ Senkronizasyon arka planda devam ediyor.` 
+    const nowCheck = Date.now();
+    // Stale lock guard: if a previous sync got stuck for >22s, allow recovery cleanly
+    if (isSyncingRef.current && (nowCheck - syncStartedAtRef.current) < 22000) {
+      return {
+        success: true,
+        message: `Senkronizasyon şu an devam ediyor (%${cloudSyncProgress}).`
       };
     }
     isSyncingRef.current = true;
+    syncStartedAtRef.current = nowCheck;
+
+    const updateProgress = (pct: number, stage: string) => {
+      const clamped = Math.max(0, Math.min(100, Math.round(pct)));
+      setCloudSyncProgress(clamped);
+      setCloudSyncStage(stage);
+      onProgress?.(clamped);
+    };
 
     let activeUser = auth.currentUser;
     if (!activeUser || activeUser.isAnonymous) {
@@ -1746,6 +1777,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     if (!activeUser || !auth.currentUser || auth.currentUser.isAnonymous) {
       isSyncingRef.current = false;
+      syncStartedAtRef.current = 0;
+      setCloudSyncStatus('offline');
+      updateProgress(0, '');
       return {
         success: false,
         message: '⚠️ Kalıcı bulut eşitlemesi için Google hesabınızla giriş yapın. Yerel verileriniz cihazda kaydedildi.'
@@ -1757,45 +1791,113 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const nowMs = Date.now();
     if (!forceSync && lastSyncStr && (nowMs - parseInt(lastSyncStr, 10) < 1000 * 60 * 5)) {
       isSyncingRef.current = false;
+      syncStartedAtRef.current = 0;
+      setCloudSyncStatus('synced');
+      updateProgress(100, 'Bulut yedeği güncel');
       return { success: true, message: '✅ Bulut yedeğiniz zaten güncel.' };
     }
 
     setCloudSyncStatus('syncing');
-    onProgress?.(25);
+    updateProgress(10, 'Bulut bağlantısı doğrulanıyor...');
+
+    let progressTicker: ReturnType<typeof setInterval> | null = null;
 
     try {
+      // Ensure Firestore network wasn't disabled by an earlier quota error
+      await ensureFirestoreNetwork();
+      updateProgress(28, 'Kütüphane ve arşiv paketleniyor...');
+
       let snapshot = buildCompactCloudSnapshot(uid, overrideData);
       let serialized = JSON.stringify(snapshot);
-      // Safety trim if user has thousands of custom books
-      if (serialized.length > 880000 && Array.isArray(snapshot.customBooks)) {
+      let byteSize = getUtf8ByteSize(serialized);
+
+      // Progressive compaction to strictly respect Firestore's 1 MiB document ceiling
+      if (byteSize > 850000 && Array.isArray(snapshot.customBooks)) {
         snapshot.customBooks = snapshot.customBooks.map((b: any) => ({ ...b, description: '' }));
         serialized = JSON.stringify(snapshot);
+        byteSize = getUtf8ByteSize(serialized);
+      }
+      if (byteSize > 850000 && Array.isArray(snapshot.readingSessions)) {
+        snapshot.readingSessions = snapshot.readingSessions.slice(0, 200);
+        serialized = JSON.stringify(snapshot);
+        byteSize = getUtf8ByteSize(serialized);
+      }
+      if (byteSize > 850000 && Array.isArray(snapshot.customBooks)) {
+        snapshot.customBooks = snapshot.customBooks.map((b: any) => ({ ...b, coverUrl: '' }));
+        serialized = JSON.stringify(snapshot);
+        byteSize = getUtf8ByteSize(serialized);
       }
 
-      onProgress?.(65);
-      // Single atomic Firestore write (1 write unit instead of 550+ writes!)
-      await setDoc(doc(db, 'users', uid), snapshot, { merge: true });
+      const payloadKB = Math.max(1, Math.round(byteSize / 1024));
+      let livePct = 52;
+      updateProgress(livePct, `Firestore buluta aktarılıyor (${payloadKB} KB)...`);
 
-      localStorage.setItem('dk_last_sync_time', String(nowMs));
-      onProgress?.(100);
+      progressTicker = setInterval(() => {
+        if (livePct < 92) {
+          livePct = Math.min(92, livePct + 5);
+          setCloudSyncProgress(livePct);
+          onProgress?.(livePct);
+        }
+      }, 450);
+
+      // Single atomic Firestore write protected by a 15-second timeout so it never hangs forever
+      await Promise.race([
+        setDoc(doc(db, 'users', uid), snapshot, { merge: true }),
+        new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error('SYNC_TIMEOUT')), 15000)
+        )
+      ]);
+
+      if (progressTicker) {
+        clearInterval(progressTicker);
+        progressTicker = null;
+      }
+
+      const completedIso = new Date().toISOString();
+      try {
+        localStorage.setItem('dk_last_sync_time', String(Date.now()));
+        localStorage.setItem('dk_last_sync_iso', completedIso);
+      } catch {}
+      setLastCloudSyncAt(completedIso);
+
+      updateProgress(100, `Tamamlandı (${payloadKB} KB)`);
       setCloudSyncStatus('synced');
-      return { 
-        success: true, 
-        message: `✅ Tüm yedeğiniz tek pakette Google bulut hesabınıza kalıcı olarak eşitlendi!` 
+      return {
+        success: true,
+        message: `✅ Bulut eşitlemesi tamamlandı (${payloadKB} KB: ${snapshot.customBooks.length} kitap kaydı, ${snapshot.quotations.length} alıntı, ${snapshot.readingSessions.length} oturum).`
       };
     } catch (err: any) {
+      if (progressTicker) {
+        clearInterval(progressTicker);
+        progressTicker = null;
+      }
       handleFirestoreError(err, OperationType.WRITE, `users/${uid}`);
-      if (err?.code === 'resource-exhausted' || String(err?.message).includes('Quota limit exceeded')) {
+      const errMsg = String(err?.message || '');
+      if (err?.code === 'resource-exhausted' || errMsg.includes('Quota limit exceeded')) {
         setCloudSyncStatus('offline');
-        return { success: false, message: '⚠️ Günlük Firestore kotası doldu. Verileriniz cihazınızda güvenle korunuyor; yarın otomatik devam edilebilir.' };
+        updateProgress(0, 'Günlük bulut kotası doldu');
+        return { success: false, message: '⚠️ Günlük Firestore kotası doldu. Verileriniz cihazınızda güvenle korunuyor; yarın tekrar deneyebilirsiniz.' };
+      }
+      if (errMsg === 'SYNC_TIMEOUT') {
+        setCloudSyncStatus('error');
+        updateProgress(0, 'Bağlantı zaman aşımı');
+        return {
+          success: false,
+          message: '⚠️ Bulut sunucusu 15 saniye içinde yanıt vermedi (internet bağlantınız yavaş veya çevrimdışı olabilir). Verileriniz cihazınızda güvenle kaydedildi.'
+        };
       }
       setCloudSyncStatus('error');
-      return { 
-        success: false, 
-        message: `⚠️ Bulut eşitlemesi tamamlanamadı (${err?.message || 'bağlantı hatası'}), yerel veriler güvende.` 
+      updateProgress(0, 'Aktarım hatası');
+      return {
+        success: false,
+        message: `⚠️ Bulut eşitlemesi tamamlanamadı (${errMsg || 'bağlantı hatası'}), yerel veriler güvende.`
       };
     } finally {
+      if (progressTicker) {
+        clearInterval(progressTicker);
+      }
       isSyncingRef.current = false;
+      syncStartedAtRef.current = 0;
     }
   };
 
@@ -1805,16 +1907,53 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       return { success: false, message: '⚠️ Buluttan geri yüklemek için Google hesabınızla giriş yapın.' };
     }
 
+    setCloudSyncStatus('syncing');
+    setCloudSyncProgress(20);
+    setCloudSyncStage('Bulut bağlantısı açılıyor...');
+
     try {
-      const snap = await getDoc(doc(db, 'users', uid));
+      await ensureFirestoreNetwork();
+      setCloudSyncProgress(55);
+      setCloudSyncStage('Bulut yedeği indiriliyor...');
+
+      const docRef = doc(db, 'users', uid);
+      let snap;
+      try {
+        snap = await Promise.race([
+          getDocFromServer(docRef),
+          new Promise<never>((_, reject) =>
+            setTimeout(() => reject(new Error('RESTORE_TIMEOUT')), 12000)
+          )
+        ]);
+      } catch (serverErr: any) {
+        if (String(serverErr?.message) === 'RESTORE_TIMEOUT') {
+          throw serverErr;
+        }
+        snap = await Promise.race([
+          getDoc(docRef),
+          new Promise<never>((_, reject) =>
+            setTimeout(() => reject(new Error('RESTORE_TIMEOUT')), 8000)
+          )
+        ]);
+      }
+
       if (!snap.exists()) {
+        setCloudSyncStatus('synced');
+        setCloudSyncProgress(100);
+        setCloudSyncStage('');
         return { success: false, message: 'Bu Google hesabında henüz bulut yedeği bulunamadı. Önce "Buluta Şimdi Senkronize Et"e basın.' };
       }
 
       const data = snap.data() as any;
       if (!data || !data.snapshotVersion) {
+        setCloudSyncStatus('synced');
+        setCloudSyncProgress(100);
+        setCloudSyncStage('');
         return { success: false, message: 'Bulut kaydı bulundu ancak henüz tam kütüphane yedeği yüklenmemiş.' };
       }
+
+      setCloudSyncProgress(85);
+      setCloudSyncStage('Kütüphane birleştiriliyor...');
 
       let restoredCount = 0;
       if (Array.isArray(data.customBooks)) {
@@ -1850,8 +1989,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         safeLocalStorageSet('dk_user_profile', mergedProf);
       }
 
-      localStorage.setItem('dk_last_backup_restore_at', new Date().toISOString());
+      const syncIso = typeof data.updatedAt === 'string' ? data.updatedAt : new Date().toISOString();
+      try {
+        localStorage.setItem('dk_last_backup_restore_at', new Date().toISOString());
+        localStorage.setItem('dk_last_sync_iso', syncIso);
+      } catch {}
+      setLastCloudSyncAt(syncIso);
       setCloudSyncStatus('synced');
+      setCloudSyncProgress(100);
+      setCloudSyncStage('Buluttan geri yüklendi');
       return {
         success: true,
         restoredBooks: restoredCount,
@@ -1859,9 +2005,19 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       };
     } catch (err: any) {
       handleFirestoreError(err, OperationType.GET, `users/${uid}`);
+      const errMsg = String(err?.message || '');
+      if (err?.code === 'resource-exhausted' || errMsg.includes('Quota limit exceeded')) {
+        setCloudSyncStatus('offline');
+      } else {
+        setCloudSyncStatus('error');
+      }
+      setCloudSyncProgress(0);
+      setCloudSyncStage('');
       return {
         success: false,
-        message: `⚠️ Buluttan geri yükleme başarısız: ${err?.message || 'Bağlantı/kota hatası'}`
+        message: errMsg === 'RESTORE_TIMEOUT'
+          ? '⚠️ Bulut sunucusu 12 saniye içinde yanıt vermedi. İnternet bağlantınızı kontrol edip tekrar deneyin.'
+          : `⚠️ Buluttan geri yükleme başarısız: ${errMsg || 'Bağlantı/kota hatası'}`
       };
     }
   };
@@ -1897,6 +2053,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         selectedBookForDetail,
         setSelectedBookForDetail,
         cloudSyncStatus,
+        cloudSyncProgress,
+        cloudSyncStage,
+        lastCloudSyncAt,
         notifications,
         addNotification,
         markNotificationAsRead,
