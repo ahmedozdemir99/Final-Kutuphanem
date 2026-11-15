@@ -1,6 +1,6 @@
 import { initializeApp } from 'firebase/app';
 import { getAuth, GoogleAuthProvider, signInWithPopup, signInAnonymously, signOut } from 'firebase/auth';
-import { doc, getDocFromServer, getFirestore, setLogLevel, disableNetwork, enableNetwork } from 'firebase/firestore';
+import { doc, getDocFromServer, getFirestore, initializeFirestore, setLogLevel, disableNetwork, enableNetwork } from 'firebase/firestore';
 import firebaseConfig from '../../firebase-applet-config.json';
 
 // Silence verbose internal Firebase SDK warning logs during temporary quota exhaustion
@@ -8,7 +8,17 @@ setLogLevel('silent');
 
 
 const app = initializeApp(firebaseConfig);
-export const db = getFirestore(app, firebaseConfig.firestoreDatabaseId);
+let firestoreInstance;
+try {
+  firestoreInstance = initializeFirestore(
+    app,
+    { experimentalForceLongPolling: true },
+    firebaseConfig.firestoreDatabaseId
+  );
+} catch {
+  firestoreInstance = getFirestore(app, firebaseConfig.firestoreDatabaseId);
+}
+export const db = firestoreInstance;
 export const auth = getAuth(app);
 export const googleProvider = new GoogleAuthProvider();
 
@@ -20,10 +30,161 @@ export async function ensureFirestoreNetwork(): Promise<void> {
   try {
     await Promise.race([
       enableNetwork(db),
-      new Promise<void>((resolve) => setTimeout(resolve, 2500))
+      new Promise<void>((resolve) => setTimeout(resolve, 2000))
     ]);
   } catch {
     // Ignore network enable fallback errors
+  }
+}
+
+function toFirestoreRestValue(val: any): any {
+  if (val === null || val === undefined) return { nullValue: null };
+  if (typeof val === 'boolean') return { booleanValue: val };
+  if (typeof val === 'number') {
+    if (!Number.isFinite(val)) return { nullValue: null };
+    return Number.isInteger(val) ? { integerValue: String(val) } : { doubleValue: val };
+  }
+  if (typeof val === 'string') return { stringValue: val };
+  if (Array.isArray(val)) {
+    return {
+      arrayValue: {
+        values: val
+          .filter((item) => item !== undefined)
+          .map((item) =>
+            Array.isArray(item) ? toFirestoreRestValue(JSON.stringify(item)) : toFirestoreRestValue(item)
+          ),
+      },
+    };
+  }
+  if (typeof val === 'object') {
+    const fields: Record<string, any> = {};
+    for (const [k, v] of Object.entries(val)) {
+      if (v !== undefined) {
+        fields[k] = toFirestoreRestValue(v);
+      }
+    }
+    return { mapValue: { fields } };
+  }
+  return { stringValue: String(val) };
+}
+
+function fromFirestoreRestValue(v: any): any {
+  if (!v || typeof v !== 'object') return null;
+  if ('nullValue' in v) return null;
+  if ('booleanValue' in v) return Boolean(v.booleanValue);
+  if ('integerValue' in v) return Number(v.integerValue);
+  if ('doubleValue' in v) return Number(v.doubleValue);
+  if ('stringValue' in v) return String(v.stringValue);
+  if ('timestampValue' in v) return String(v.timestampValue);
+  if ('arrayValue' in v) {
+    const arr = Array.isArray(v.arrayValue?.values) ? v.arrayValue.values : [];
+    return arr.map(fromFirestoreRestValue);
+  }
+  if ('mapValue' in v) {
+    const fields = v.mapValue?.fields || {};
+    const out: Record<string, any> = {};
+    for (const [k, val] of Object.entries(fields)) {
+      out[k] = fromFirestoreRestValue(val);
+    }
+    return out;
+  }
+  return null;
+}
+
+export async function writeFirestoreUserSnapshotRest(
+  uid: string,
+  idToken: string,
+  data: Record<string, any>
+): Promise<{ ok: boolean; status: number; code?: string; message?: string }> {
+  const keys = Object.keys(data).filter((k) => data[k] !== undefined);
+  const fields: Record<string, any> = {};
+  for (const k of keys) {
+    fields[k] = toFirestoreRestValue(data[k]);
+  }
+
+  const maskParams = keys.map((k) => `updateMask.fieldPaths=${encodeURIComponent(k)}`).join('&');
+  const url = `https://firestore.googleapis.com/v1/projects/${encodeURIComponent(firebaseConfig.projectId)}/databases/${encodeURIComponent(firebaseConfig.firestoreDatabaseId)}/documents/users/${encodeURIComponent(uid)}?${maskParams}`;
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 12000);
+  try {
+    const resp = await fetch(url, {
+      method: 'PATCH',
+      signal: controller.signal,
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${idToken}`,
+      },
+      body: JSON.stringify({ fields }),
+    });
+    if (resp.ok) {
+      return { ok: true, status: resp.status };
+    }
+    const errJson: any = await resp.json().catch(() => ({}));
+    return {
+      ok: false,
+      status: resp.status,
+      code: errJson?.error?.status || String(resp.status),
+      message: errJson?.error?.message || resp.statusText || 'Firestore REST error',
+    };
+  } catch (err: any) {
+    return {
+      ok: false,
+      status: 0,
+      code: err?.name === 'AbortError' ? 'TIMEOUT' : 'NETWORK_ERROR',
+      message: err?.message || 'Ağ isteği tamamlanamadı',
+    };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+export async function readFirestoreUserSnapshotRest(
+  uid: string,
+  idToken: string
+): Promise<{ ok: boolean; exists: boolean; status: number; data?: Record<string, any>; code?: string; message?: string }> {
+  const url = `https://firestore.googleapis.com/v1/projects/${encodeURIComponent(firebaseConfig.projectId)}/databases/${encodeURIComponent(firebaseConfig.firestoreDatabaseId)}/documents/users/${encodeURIComponent(uid)}`;
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 10000);
+  try {
+    const resp = await fetch(url, {
+      method: 'GET',
+      signal: controller.signal,
+      headers: {
+        Authorization: `Bearer ${idToken}`,
+      },
+    });
+    if (resp.status === 404) {
+      return { ok: true, exists: false, status: 404 };
+    }
+    if (!resp.ok) {
+      const errJson: any = await resp.json().catch(() => ({}));
+      return {
+        ok: false,
+        exists: false,
+        status: resp.status,
+        code: errJson?.error?.status || String(resp.status),
+        message: errJson?.error?.message || resp.statusText || 'Firestore REST read error',
+      };
+    }
+    const docJson: any = await resp.json();
+    const fields = docJson?.fields || {};
+    const parsed: Record<string, any> = {};
+    for (const [k, v] of Object.entries(fields)) {
+      parsed[k] = fromFirestoreRestValue(v);
+    }
+    return { ok: true, exists: true, status: resp.status, data: parsed };
+  } catch (err: any) {
+    return {
+      ok: false,
+      exists: false,
+      status: 0,
+      code: err?.name === 'AbortError' ? 'TIMEOUT' : 'NETWORK_ERROR',
+      message: err?.message || 'Ağ isteği tamamlanamadı',
+    };
+  } finally {
+    clearTimeout(timer);
   }
 }
 

@@ -4,7 +4,7 @@ import { doc, getDoc, getDocFromServer, setDoc, deleteDoc } from 'firebase/fires
 import { BookReview, BookStatus, MainTab, Quotation, ReadingSession, UserBook, UserProfile, VocabularyItem, QuranProgress, AppNotification, Badge } from '../types';
 import { DEFAULT_USER_BOOKS, DEFAULT_BOOK_COVERS, MAIN_CATEGORIES, inferCategoryForBook } from '../data/catalogData';
 import { PERMANENT_BOOKS } from '../data/permanentBooks';
-import { auth, db, loginWithGoogle, handleFirestoreError, OperationType, ensureFirestoreNetwork } from '../lib/firebase';
+import { auth, db, loginWithGoogle, handleFirestoreError, OperationType, ensureFirestoreNetwork, writeFirestoreUserSnapshotRest, readFirestoreUserSnapshotRest } from '../lib/firebase';
 import { saveBookFileToIDB, getBookFileFromIDB, saveCoverToIDB, getCoverFromIDB, saveAppDataToIDB, getAppDataFromIDB, deleteBookDataFromIDB, requestPersistentStorage } from '../lib/indexedDb';
 import { validateBackupJSON, ValidationResult } from '../lib/jsonValidator';
 import { AVAILABLE_BADGES } from '../data/badgeData';
@@ -1166,13 +1166,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       }
     }
 
-    // Background cleanup for duplicate documents in Firestore
-    if (toDeleteIds.length > 0 && auth.currentUser) {
-      toDeleteIds.forEach(id => {
-        deleteDoc(doc(db, 'userBooks', id)).catch(() => {});
-      });
-    }
-
     return Array.from(seen.values());
   };
 
@@ -1273,9 +1266,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     if (toDeleteIds.length > 0) {
       toDeleteIds.forEach(id => {
         deleteBookDataFromIDB(id).catch(() => {});
-        if (auth.currentUser) {
-          deleteDoc(doc(db, 'userBooks', id)).catch(err => console.warn('dedup firestore delete notice:', err));
-        }
       });
     }
 
@@ -1840,13 +1830,36 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         }
       }, 450);
 
-      // Single atomic Firestore write protected by a 15-second timeout so it never hangs forever
-      await Promise.race([
-        setDoc(doc(db, 'users', uid), snapshot, { merge: true }),
-        new Promise<never>((_, reject) =>
-          setTimeout(() => reject(new Error('SYNC_TIMEOUT')), 15000)
-        )
-      ]);
+      // Primary: Firestore SDK write with 5s timeout; Fallback: direct Firestore REST API PATCH
+      let wroteViaRest = false;
+      try {
+        await Promise.race([
+          setDoc(doc(db, 'users', uid), snapshot, { merge: true }),
+          new Promise<never>((_, reject) =>
+            setTimeout(() => reject(new Error('SDK_TIMEOUT')), 5000)
+          )
+        ]);
+      } catch (sdkErr: any) {
+        const sdkMsg = String(sdkErr?.message || '');
+        if (sdkErr?.code === 'resource-exhausted' || sdkMsg.includes('Quota limit exceeded')) {
+          throw sdkErr;
+        }
+        updateProgress(Math.max(livePct, 75), 'Doğrudan bulut API ile aktarılıyor...');
+        const idToken = await auth.currentUser.getIdToken(true);
+        const restRes = await writeFirestoreUserSnapshotRest(uid, idToken, snapshot);
+        if (!restRes.ok) {
+          if (restRes.status === 429 || restRes.code === 'RESOURCE_EXHAUSTED' || String(restRes.message).includes('Quota')) {
+            const quotaErr: any = new Error('Quota limit exceeded');
+            quotaErr.code = 'resource-exhausted';
+            throw quotaErr;
+          }
+          if (restRes.code === 'TIMEOUT') {
+            throw new Error('SYNC_TIMEOUT');
+          }
+          throw new Error(restRes.message || `HTTP ${restRes.status}`);
+        }
+        wroteViaRest = true;
+      }
 
       if (progressTicker) {
         clearInterval(progressTicker);
@@ -1864,7 +1877,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       setCloudSyncStatus('synced');
       return {
         success: true,
-        message: `✅ Bulut eşitlemesi tamamlandı (${payloadKB} KB: ${snapshot.customBooks.length} kitap kaydı, ${snapshot.quotations.length} alıntı, ${snapshot.readingSessions.length} oturum).`
+        message: `✅ Bulut eşitlemesi tamamlandı (${payloadKB} KB${wroteViaRest ? ' · Doğrudan API' : ''}: ${snapshot.customBooks.length} kitap kaydı, ${snapshot.quotations.length} alıntı, ${snapshot.readingSessions.length} oturum).`
       };
     } catch (err: any) {
       if (progressTicker) {
@@ -1883,7 +1896,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         updateProgress(0, 'Bağlantı zaman aşımı');
         return {
           success: false,
-          message: '⚠️ Bulut sunucusu 15 saniye içinde yanıt vermedi (internet bağlantınız yavaş veya çevrimdışı olabilir). Verileriniz cihazınızda güvenle kaydedildi.'
+          message: '⚠️ Bulut sunucusu yanıt vermedi (internet bağlantınız yavaş veya çevrimdışı olabilir). Verileriniz cihazınızda güvenle kaydedildi.'
         };
       }
       setCloudSyncStatus('error');
@@ -1917,34 +1930,61 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       setCloudSyncStage('Bulut yedeği indiriliyor...');
 
       const docRef = doc(db, 'users', uid);
-      let snap;
+      let data: any = null;
+      let exists = false;
+
       try {
-        snap = await Promise.race([
+        const snap = await Promise.race([
           getDocFromServer(docRef),
           new Promise<never>((_, reject) =>
-            setTimeout(() => reject(new Error('RESTORE_TIMEOUT')), 12000)
+            setTimeout(() => reject(new Error('SDK_READ_TIMEOUT')), 5000)
           )
         ]);
+        exists = snap.exists();
+        if (exists) data = snap.data();
       } catch (serverErr: any) {
-        if (String(serverErr?.message) === 'RESTORE_TIMEOUT') {
+        const errText = String(serverErr?.message || '');
+        if (serverErr?.code === 'resource-exhausted' || errText.includes('Quota limit exceeded')) {
           throw serverErr;
         }
-        snap = await Promise.race([
-          getDoc(docRef),
-          new Promise<never>((_, reject) =>
-            setTimeout(() => reject(new Error('RESTORE_TIMEOUT')), 8000)
-          )
-        ]);
+        // Fallback to direct Firestore REST GET
+        if (auth.currentUser) {
+          setCloudSyncProgress(70);
+          setCloudSyncStage('Doğrudan bulut API ile okunuyor...');
+          const idToken = await auth.currentUser.getIdToken();
+          const restRead = await readFirestoreUserSnapshotRest(uid, idToken);
+          if (!restRead.ok) {
+            if (restRead.status === 429 || restRead.code === 'RESOURCE_EXHAUSTED') {
+              const quotaErr: any = new Error('Quota limit exceeded');
+              quotaErr.code = 'resource-exhausted';
+              throw quotaErr;
+            }
+            if (restRead.code === 'TIMEOUT') {
+              throw new Error('RESTORE_TIMEOUT');
+            }
+            throw new Error(restRead.message || `HTTP ${restRead.status}`);
+          }
+          exists = restRead.exists;
+          data = restRead.data;
+        } else {
+          const snap = await Promise.race([
+            getDoc(docRef),
+            new Promise<never>((_, reject) =>
+              setTimeout(() => reject(new Error('RESTORE_TIMEOUT')), 6000)
+            )
+          ]);
+          exists = snap.exists();
+          if (exists) data = snap.data();
+        }
       }
 
-      if (!snap.exists()) {
+      if (!exists) {
         setCloudSyncStatus('synced');
         setCloudSyncProgress(100);
         setCloudSyncStage('');
         return { success: false, message: 'Bu Google hesabında henüz bulut yedeği bulunamadı. Önce "Buluta Şimdi Senkronize Et"e basın.' };
       }
 
-      const data = snap.data() as any;
       if (!data || !data.snapshotVersion) {
         setCloudSyncStatus('synced');
         setCloudSyncProgress(100);
