@@ -63,6 +63,7 @@ export const ChatView: React.FC = () => {
 
   const [inputMessage, setInputMessage] = useState('');
   const [isLoading, setIsLoading] = useState(false);
+  const [showRagDetails, setShowRagDetails] = useState(false);
 
   const [messages, setMessages] = useState<Message[]>([{
     role: 'model',
