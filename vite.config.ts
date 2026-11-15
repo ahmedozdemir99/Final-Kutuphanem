@@ -12,19 +12,20 @@ export default defineConfig(() => {
       VitePWA({
         registerType: 'autoUpdate',
         injectRegister: null,
-        includeAssets: ['favicon.ico', 'apple-touch-icon.png', 'icon.svg'],
+        includeAssets: ['favicon.ico', 'apple-touch-icon.png', 'icon.svg', 'final-kutuphanem-icon.svg'],
         manifest: {
-          id: '/?v=6',
-          name: 'Dijital Kütüphanem',
+          id: '/',
+          name: 'Final-Kutuphanem',
           short_name: 'Kütüphanem',
           description: 'Premium Personal Library & Lifelong Learning System',
           theme_color: '#742C3C',
           background_color: '#F8F5EF',
-          display: 'minimal-ui',
+          display: 'standalone',
           orientation: 'portrait',
           start_url: '/?source=pwa',
           scope: '/',
           icons: [
+            { src: '/final-kutuphanem-icon.svg', sizes: 'any', type: 'image/svg+xml', purpose: 'any' },
             {
               src: '/icon-192.png',
               sizes: '192x192',
