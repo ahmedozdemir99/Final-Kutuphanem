@@ -61,6 +61,9 @@ export const ChatView: React.FC = () => {
   const { userBooks, readingSessions, quotations, userProfile, reviews, vocabulary } = useApp();
   const fullPoetryCollection = useMemo(() => getFull256PoetryCollection(), []);
 
+  const [inputMessage, setInputMessage] = useState('');
+  const [isLoading, setIsLoading] = useState(false);
+
   const [messages, setMessages] = useState<Message[]>([{
     role: 'model',
     text: `Selâmün Aleyküm! 🐿️ Ben senin bilge sincap koçun ve ilim arkadaşın **Robi**'yim! Kütüphanendeki 12 ana kategoriye, tamamlanan ve okunacak eserlerine, 256 şiir arşivimize ve 40 yıllık ilim müfredatımıza tam vukufiyetle hakimim. Bugün hangi hikmetli konuyu ele alalım?`
