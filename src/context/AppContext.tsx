@@ -1746,6 +1746,19 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
 
+  // Debounced cloud backup only after a successful read of the signed-in user's data.
+  // The explicit sync function remains available for immediate backup and error reporting.
+  useEffect(() => {
+    if (!isHydrated || !cloudRestoreReady || !currentUser || currentUser.isAnonymous) return;
+    if (!navigator.onLine) return;
+    const timer = window.setTimeout(() => {
+      syncAllDataToCloud().then(result => {
+        if (!result.success) console.warn('Otomatik bulut yedeği:', result.message);
+      }).catch(error => console.warn('Otomatik bulut yedeği başarısız:', error));
+    }, 15000);
+    return () => window.clearTimeout(timer);
+  }, [isHydrated, cloudRestoreReady, currentUser?.uid, userBooks, readingSessions, reviews, quotations, vocabulary, quranProgress]);
+
   const verifyDataIntegrity = () => {
     return {
       totalBooks: userBooks.length,
