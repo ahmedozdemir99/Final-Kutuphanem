@@ -1,5 +1,5 @@
 import { initializeApp } from 'firebase/app';
-import { getAuth, GoogleAuthProvider, signInWithPopup, signInAnonymously, signOut } from 'firebase/auth';
+import { getAuth, GoogleAuthProvider, signInWithPopup, signOut, setPersistence, browserLocalPersistence } from 'firebase/auth';
 import { doc, getDocFromServer, getFirestore, setLogLevel, disableNetwork } from 'firebase/firestore';
 import firebaseConfig from '../../firebase-applet-config.json';
 
@@ -19,47 +19,13 @@ export function handleQuotaExhaustion() {
 
 
 export async function loginWithGoogle() {
-  // 1. Attempt Google OAuth Popup
-  try {
-    const result = await signInWithPopup(auth, googleProvider);
-    if (result && result.user) {
-      return result.user;
-    }
-  } catch (popupErr: any) {
-    console.info("[Firebase Auth] Google OAuth popup bypass:", popupErr?.code || popupErr?.message);
+  // PWA sessions should survive app restarts. Never silently switch to an anonymous identity.
+  await setPersistence(auth, browserLocalPersistence);
+  const result = await signInWithPopup(auth, googleProvider);
+  if (!result.user || result.user.isAnonymous) {
+    throw new Error('Google hesabıyla giriş yapılamadı.');
   }
-
-  // 2. Fallback: Firebase Anonymous Cloud Auth
-  try {
-    const anonResult = await signInAnonymously(auth);
-    if (anonResult && anonResult.user) {
-      return anonResult.user;
-    }
-  } catch (anonErr: any) {
-    console.info("[Firebase Auth] Anonymous Cloud Auth bypass:", anonErr?.code || anonErr?.message);
-  }
-
-  // 3. Fallback: Existing Firebase user or persistent Local-Cloud User Session
-  if (auth.currentUser) {
-    return auth.currentUser;
-  }
-
-  const getLocalUid = () => {
-    if (typeof window === 'undefined') return 'guest_user';
-    let id = localStorage.getItem('dk_persistent_uid');
-    if (!id) {
-      id = 'user_' + Math.random().toString(36).substring(2, 10) + Date.now().toString(36);
-      localStorage.setItem('dk_persistent_uid', id);
-    }
-    return id;
-  };
-
-  return {
-    uid: getLocalUid(),
-    displayName: 'Ağırbaşlı Okur',
-    email: 'okur@dijitalkutuphanem.org',
-    isAnonymous: true
-  } as any;
+  return result.user;
 }
 
 export async function logoutUser() {
