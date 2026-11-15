@@ -15,3 +15,4 @@ inspect_kwgt_full.js
 build_native_widget_files.js
 create_zip.js
 push_subscriptions.json
+public/assets/aistudio/

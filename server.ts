@@ -635,36 +635,39 @@ Lütfen bu aşamaya dair derinlikli, edebi ve felsefi bir "Bölüm & İlerleme A
 
   // Handle production build vs dev Vite middleware
   const distPath = path.join(process.cwd(), 'dist');
-  if (fs.existsSync(distPath)) {
-    app.use(express.static(distPath));
+  const hasDist = fs.existsSync(distPath) && fs.existsSync(path.join(distPath, 'index.html'));
+
+  if (hasDist) {
+    app.use(
+      express.static(distPath, {
+        setHeaders: (res, filePath) => {
+          const base = path.basename(filePath);
+          if (
+            base === 'index.html' ||
+            base === 'sw.js' ||
+            base === 'notifications-sw.js' ||
+            base === 'manifest.webmanifest' ||
+            base.startsWith('workbox-')
+          ) {
+            res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+          } else if (filePath.includes(`${path.sep}assets${path.sep}`)) {
+            res.setHeader('Cache-Control', 'public, max-age=604800, immutable');
+          }
+        },
+      })
+    );
     app.get('*', (req, res, next) => {
       if (req.path.startsWith('/api')) {
         return next();
       }
+      res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
       res.sendFile(path.join(distPath, 'index.html'));
     });
-  } else {
-    try {
-      // Dynamically import Vite only in dev mode so production startup in Cloud Run is instant
-      const { createServer: createViteServer } = await import('vite');
-      // Create Vite server in middleware mode with HMR disabled to prevent iframe WebSocket errors
-      const vite = await createViteServer({
-        server: { 
-          middlewareMode: true,
-          allowedHosts: true,
-          hmr: false 
-        },
-        appType: 'spa'
-      });
-      app.use(vite.middlewares);
-    } catch (viteErr) {
-      console.warn("Vite middleware load warning:", viteErr);
-    }
   }
 
   // 24/7 Cloud Background Reminder Scheduler
   // Triggers Web Push to user devices at their scheduled time, even when phone screen and app are completely closed!
-  setInterval(async () => {
+  const reminderTimer = setInterval(async () => {
     try {
       if (pushSubscriptions.length === 0) return;
 
@@ -710,7 +713,6 @@ Lütfen bu aşamaya dair derinlikli, edebi ve felsefi bir "Bölüm & İlerleme A
             } catch (err: any) {
               console.warn('[Scheduled Push Failed]:', err?.statusCode || err?.message);
               if (err?.statusCode === 410 || err?.statusCode === 404) {
-                // Subscription has expired or unsubscribed
                 pushSubscriptions.splice(i, 1);
                 modified = true;
               }
@@ -727,10 +729,51 @@ Lütfen bu aşamaya dair derinlikli, edebi ve felsefi bir "Bölüm & İlerleme A
     }
   }, 30000);
 
+  // Open HTTP port immediately so Cloud Run startup health checks pass without waiting for Vite
+  let viteMiddleware: any = null;
+  if (!hasDist) {
+    app.use((req, res, next) => {
+      if (req.path.startsWith('/api')) {
+        return next();
+      }
+      if (viteMiddleware) {
+        return viteMiddleware(req, res, next);
+      }
+      res.status(503).set('Retry-After', '1').send('Yükleniyor...');
+    });
+  }
+
   const port = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
-  app.listen(port, '0.0.0.0', () => {
+  const server = app.listen(port, '0.0.0.0', () => {
     console.log(`Server running on http://0.0.0.0:${port}`);
   });
+
+  if (!hasDist) {
+    (async () => {
+      try {
+        const { createServer: createViteServer } = await import('vite');
+        const vite = await createViteServer({
+          server: {
+            middlewareMode: true,
+            allowedHosts: true,
+            hmr: false
+          },
+          appType: 'spa'
+        });
+        viteMiddleware = vite.middlewares;
+      } catch (viteErr) {
+        console.warn("Vite middleware load warning:", viteErr);
+      }
+    })();
+  }
+
+  const shutdown = () => {
+    clearInterval(reminderTimer);
+    server.close(() => process.exit(0));
+    setTimeout(() => process.exit(0), 2000).unref();
+  };
+  process.on('SIGTERM', shutdown);
+  process.on('SIGINT', shutdown);
 }
 
 startServer();

@@ -1,9 +1,7 @@
 // Dijital Kütüphanem - Service Worker for Offline PWA & Background Notifications
 
-const CACHE_NAME = 'dijital-kutuphanem-v7';
+const CACHE_NAME = 'dijital-kutuphanem-v8';
 const STATIC_ASSETS = [
-  '/',
-  '/index.html',
   '/icon-192.png',
   '/icon-512.png',
   '/pwa-maskable-192x192.png',
