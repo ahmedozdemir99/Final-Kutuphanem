@@ -20,6 +20,35 @@ import { StandaloneWidgetView } from './components/StandaloneWidgetView';
 import { MainTab } from './types';
 
 
+class ChatErrorBoundary extends React.Component<
+  { children: React.ReactNode },
+  { error: Error | null }
+> {
+  state: { error: Error | null } = { error: null };
+
+  static getDerivedStateFromError(error: Error) {
+    return { error };
+  }
+
+  componentDidCatch(error: Error, info: React.ErrorInfo) {
+    console.error('Okuma Arkadaşı ekran hatası:', error, info.componentStack);
+  }
+
+  render() {
+    if (this.state.error) {
+      return (
+        <section role="alert" className="rounded-2xl border border-red-200 bg-white dark:bg-[#242424] p-5 space-y-3">
+          <h2 className="text-lg font-bold">Yapay zekâ bölümü açılamadı</h2>
+          <p>Bir ekran hatası oluştu. Kitaplarınız ve kütüphane verileriniz etkilenmez.</p>
+          <p className="text-sm break-words text-red-700 dark:text-red-300">Hata: {this.state.error.message}</p>
+          <button type="button" className="rounded-xl bg-[#742C3C] px-4 py-2 text-white" onClick={() => this.setState({ error: null })}>Tekrar dene</button>
+        </section>
+      );
+    }
+    return this.props.children;
+  }
+}
+
 function MainAppContent() {
   const isWidgetMode = window.location.search.includes('widget') || 
                        window.location.hash.includes('widget') || 
@@ -235,7 +264,7 @@ function MainAppContent() {
         {activeTab === 'explore' && <ExploreView />}
         {activeTab === 'archive' && <ArchiveView />}
         {activeTab === 'stats' && <StatsView />}
-        {activeTab === 'chat' && <ChatView />}
+        {activeTab === 'chat' && <ChatErrorBoundary><ChatView /></ChatErrorBoundary>}
         {activeTab === 'profile' && <ProfileView />}
       </main>
 
