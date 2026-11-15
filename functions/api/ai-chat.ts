@@ -1,5 +1,8 @@
 interface Env { GEMINI_API_KEY?: string }
 
+let cachedModels: string[] = [];
+let modelsCachedAt = 0;
+
 export const onRequestPost = async ({ request, env }: { request: Request; env: Env }): Promise<Response> => {
   const json = (data: unknown, status = 200) => new Response(JSON.stringify(data), {
     status,
@@ -29,23 +32,28 @@ export const onRequestPost = async ({ request, env }: { request: Request; env: E
       generationConfig: { maxOutputTokens: 1400, temperature: 0.7 }
     });
     // Discover models actually available to this key instead of guessing model IDs.
-    const discovery = await fetch('https://generativelanguage.googleapis.com/v1beta/models?pageSize=100', {
-      headers: { 'x-goog-api-key': env.GEMINI_API_KEY! }
-    });
-    const discovered: any = await discovery.json().catch(() => null);
-    if (!discovery.ok) {
-      console.error('Gemini model discovery failed', discovery.status, discovered?.error?.status);
-      return json({ error: 'Gemini model listesi alınamadı (' + discovery.status + '). Google API durumu: ' + String(discovered?.error?.status || 'bilinmiyor') + '.' }, 502);
+    let models = cachedModels;
+    if (!models.length || Date.now() - modelsCachedAt > 60 * 60 * 1000) {
+      const discovery = await fetch('https://generativelanguage.googleapis.com/v1beta/models?pageSize=100', {
+        headers: { 'x-goog-api-key': env.GEMINI_API_KEY! }
+      });
+      const discovered: any = await discovery.json().catch(() => null);
+      if (!discovery.ok) {
+        console.error('Gemini model discovery failed', discovery.status, discovered?.error?.status);
+        return json({ error: 'Gemini model listesi alınamadı (' + discovery.status + '). Google API durumu: ' + String(discovered?.error?.status || 'bilinmiyor') + '.' }, 502);
+      }
+      models = (Array.isArray(discovered?.models) ? discovered.models : [])
+        .filter((item: any) => Array.isArray(item.supportedGenerationMethods) && item.supportedGenerationMethods.includes('generateContent'))
+        .map((item: any) => String(item.name || '').replace('models/', ''))
+        .filter((name: string) => name.startsWith('gemini-') && !name.includes('embedding') && !name.includes('image') && !name.includes('tts'))
+        .sort((a: string, b: string) => {
+          const rank = (name: string) => name.includes('flash-lite') ? 0 : name.includes('flash') ? 1 : 2;
+          return rank(a) - rank(b);
+        }).slice(0, 5);
+      if (!models.length) return json({ error: 'Bu Google API anahtarı için generateContent destekleyen Gemini modeli listelenmiyor. Generative Language API erişimini kontrol edin.' }, 502);
+        cachedModels = models;
+      modelsCachedAt = Date.now();
     }
-    const models: string[] = (Array.isArray(discovered?.models) ? discovered.models : [])
-      .filter((item: any) => Array.isArray(item.supportedGenerationMethods) && item.supportedGenerationMethods.includes('generateContent'))
-      .map((item: any) => String(item.name || '').replace('models/', ''))
-      .filter((name: string) => name.startsWith('gemini-') && !name.includes('embedding') && !name.includes('image') && !name.includes('tts'))
-      .sort((a: string, b: string) => {
-        const rank = (name: string) => name.includes('flash-lite') ? 0 : name.includes('flash') ? 1 : 2;
-        return rank(a) - rank(b);
-      }).slice(0, 5);
-    if (!models.length) return json({ error: 'Bu Google API anahtarı için generateContent destekleyen Gemini modeli listelenmiyor. Generative Language API erişimini kontrol edin.' }, 502);
     for (const model of models) {
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), 20000);
