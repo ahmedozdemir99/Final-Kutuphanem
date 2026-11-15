@@ -1,5 +1,5 @@
 import React, { createContext, useContext, useState, useEffect } from 'react';
-import { onAuthStateChanged, signInAnonymously, User as FirebaseUser } from 'firebase/auth';
+import { onAuthStateChanged, User as FirebaseUser } from 'firebase/auth';
 import { collection, doc, onSnapshot, setDoc, deleteDoc, query, where, getDocs } from 'firebase/firestore';
 import { BookReview, BookStatus, MainTab, Quotation, ReadingSession, UserBook, UserProfile, VocabularyItem, QuranProgress, AppNotification, Badge } from '../types';
 import { DEFAULT_USER_BOOKS, DEFAULT_BOOK_COVERS, MAIN_CATEGORIES, inferCategoryForBook } from '../data/catalogData';
@@ -721,13 +721,47 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           photoURL: user.photoURL || prev.photoURL
         }));
       } else {
-        // Automatically authenticate anonymously without fetching data
-        signInAnonymously(auth).catch(() => {});
+        // Do not silently create a new identity when the Google session expires.
+        setCloudSyncStatus('offline');
       }
     });
 
     return () => unsubscribeAuth();
   }, []);
+
+  // Restore the signed-in user's own books after local hydration. Never replace local data
+  // with an empty or failed cloud response. This is additive to protect imported backups.
+  const [cloudRestoreReady, setCloudRestoreReady] = useState(false);
+  useEffect(() => {
+    if (!isHydrated || !currentUser || currentUser.isAnonymous) return;
+    let cancelled = false;
+    setCloudRestoreReady(false);
+    const restore = async () => {
+      try {
+        const snapshot = await getDocs(query(collection(db, 'userBooks'), where('userId', '==', currentUser.uid)));
+        if (cancelled) return;
+        const remoteBooks = snapshot.docs.map(item => item.data() as UserBook);
+        if (remoteBooks.length) {
+          setUserBooks(prev => {
+            const byId = new Map(prev.map(book => [book.id, book]));
+            remoteBooks.forEach(remote => {
+              const local = byId.get(remote.id);
+              if (!local || Date.parse(remote.updatedAt || '') > Date.parse(local.updatedAt || '')) {
+                byId.set(remote.id, remote);
+              }
+            });
+            return Array.from(byId.values());
+          });
+        }
+        setCloudRestoreReady(true);
+      } catch (error) {
+        console.warn('Buluttan geri yükleme başarısız; yerel arşiv korunuyor.', error);
+        if (!cancelled) setCloudSyncStatus('error');
+      }
+    };
+    restore();
+    return () => { cancelled = true; };
+  }, [isHydrated, currentUser?.uid]);
 
   // Periodic background auto-sync to Cloud and IndexedDB every 30 seconds + on visibilitychange/unload
   // Periodic auto-sync removed to drastically reduce Firestore read/write quota usage.
@@ -751,7 +785,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   // Helper for resilient Firestore writes with quota limit handling
   const safeFirestoreSet = async (docRef: any, data: any) => {
-    if (!auth.currentUser) return;
+    if (!auth.currentUser || auth.currentUser.isAnonymous) throw new Error('Google oturumu gerekli.');
     try {
       const sanitized = cleanForFirestore(data);
       await setDoc(docRef, sanitized);
@@ -762,6 +796,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       } else {
         console.warn("Firestore yazma uyarısı:", err?.message || err);
       }
+      throw err;
     }
   };
 
@@ -1584,12 +1619,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
       onProgress?.(90);
 
-      // Trigger cloud sync asynchronously in background without blocking the UI
-      if (auth.currentUser) {
-        setTimeout(() => {
-          syncAllDataToCloud().catch(e => console.warn("Background sync warning:", e));
-        }, 100);
-      }
+      // Imported data is saved locally. The next explicit cloud sync reports write failures.
 
       onProgress?.(100);
 
@@ -1611,38 +1641,19 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const syncAllDataToCloud = async (onProgress?: (progress: number) => void): Promise<{ success: boolean; message: string }> => {
     if (isSyncingRef.current) {
       return { 
-        success: true, 
-        message: `✅ Senkronizasyon arka planda devam ediyor.` 
+        success: false, 
+        message: `Senkronizasyon zaten devam ediyor; tamamlanmasını bekleyin.` 
       };
     }
     isSyncingRef.current = true;
 
-    // Quota Management: Check if we are offline or likely to exceed quota
-    if (cloudSyncStatus === 'offline') {
+    const activeUser = auth.currentUser;
+    if (!activeUser || activeUser.isAnonymous) {
       isSyncingRef.current = false;
-      return { success: false, message: '⚠️ Bulut bağlantısı şu an kapalı. Yerel verileriniz güvendedir.' };
+      return { success: false, message: 'Buluta kaydetmek için Google hesabınızla giriş yapın.' };
     }
-
-    let activeUser = auth.currentUser;
-    if (!activeUser) {
-      try {
-        activeUser = await loginWithGoogle();
-      } catch {
-        // continue
-      }
-    }
-
-    const uid = activeUser?.uid || (typeof window !== 'undefined' ? (localStorage.getItem('dk_persistent_uid') || 'guest_user') : 'guest_user');
-    
-    // Check if enough changes exist to justify a sync call, or just skip if small changes
-    // to save read/write quota for important updates
-    const lastSyncStr = localStorage.getItem('dk_last_sync_time');
-    const nowMs = Date.now();
-    if (lastSyncStr && (nowMs - parseInt(lastSyncStr) < 1000 * 60 * 15)) {
-      isSyncingRef.current = false;
-      return { success: true, message: '✅ Verileriniz zaten güncel.' };
-    }
-
+    const uid = activeUser.uid;
+    // Never report a successful sync without checking the actual writes.
     setCloudSyncStatus('syncing');
     onProgress?.(20);
 
@@ -1650,7 +1661,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       onProgress?.(30);
 
       const cleanBooks = mergeAndDeduplicateBooksList(userBooks);
-      setUserBooks(cleanBooks);
 
       // Pre-process cover images asynchronously BEFORE creating write batches
       const preparedBooks = await Promise.all(
@@ -1702,15 +1712,29 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
       onProgress?.(80);
 
-      // Safely write all documents resiliently in parallel chunks using safeFirestoreSet
-      // Reduced chunk size for safer quota usage
-      const chunkSize = 10;
-      for (let i = 0; i < allOps.length; i += chunkSize) {
-        const chunk = allOps.slice(i, i + chunkSize);
-        await Promise.allSettled(chunk.map(op => safeFirestoreSet(op.ref, op.data)));
+      // A disconnected Firestore client may queue writes indefinitely. Bound the UI wait
+      // without claiming the queued writes were cancelled or successfully uploaded.
+      const uploadAll = async () => {
+        const chunkSize = 10;
+        for (let i = 0; i < allOps.length; i += chunkSize) {
+          const chunk = allOps.slice(i, i + chunkSize);
+          await Promise.all(chunk.map(op => safeFirestoreSet(op.ref, op.data)));
+          onProgress?.(80 + Math.round(18 * (i + chunk.length) / Math.max(1, allOps.length)));
+        }
+      };
+      let uploadTimer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        await Promise.race([
+          uploadAll(),
+          new Promise<never>((_, reject) => {
+            uploadTimer = setTimeout(() => reject(new Error('Bulut yanıtı 60 saniye içinde gelmedi. Bağlantıyı ve Firestore izinlerini kontrol edin; bekleyen yazmalar devam edebilir.')), 60000);
+          })
+        ]);
+      } finally {
+        if (uploadTimer !== undefined) clearTimeout(uploadTimer);
       }
 
-      localStorage.setItem('dk_last_sync_time', String(nowMs));
+      localStorage.setItem('dk_last_sync_time', String(Date.now()));
       onProgress?.(100);
       setCloudSyncStatus('synced');
       return { 
@@ -1724,17 +1748,19 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         return { success: false, message: '⚠️ Günlük bulut kotası doldu. Verileriniz yerel cihazınızda güvendedir.' };
       }
       console.warn("Cloud sync warning:", err);
-      onProgress?.(100);
-      setCloudSyncStatus('synced');
-      return { 
-        success: true, 
-        message: `✅ Verileriniz yerel olarak güvenle kaydedildi.` 
+      setCloudSyncStatus('error');
+      return {
+        success: false,
+        message: `Bulut eşitlemesi başarısız (${err?.code || 'bilinmeyen hata'}): ${err?.message || 'Bağlantıyı ve Firebase kurallarını kontrol edin.'} Yerel verilerinizi ve JSON yedeğinizi koruyun.`
       };
     } finally {
       isSyncingRef.current = false;
     }
   };
 
+
+  // Do not start a full-library upload automatically. Users can initiate a backup
+  // explicitly after reviewing their local data and JSON export.
 
   const verifyDataIntegrity = () => {
     return {

@@ -69,30 +69,41 @@ export const ChatView: React.FC = () => {
     text: `Selâmün Aleyküm! 🐿️ Ben senin bilge sincap koçun ve ilim arkadaşın **Robi**'yim! Kütüphanendeki 12 ana kategoriye, tamamlanan ve okunacak eserlerine, 256 şiir arşivimize ve 40 yıllık ilim müfredatımıza tam vukufiyetle hakimim. Bugün hangi hikmetli konuyu ele alalım?`
   }]);
 
-  // Load chat history on mount from LocalStorage, fallback to Firestore only if LocalStorage is empty
+  // Chat history is optional; a denied Firestore read must never blank the chat UI.
   useEffect(() => {
+    let cancelled = false;
     const loadHistory = async () => {
-      if (!auth.currentUser) return;
-      
-      const cachedHistory = localStorage.getItem(`chat_history_${auth.currentUser.uid}`);
-      if (cachedHistory) {
-        setMessages(JSON.parse(cachedHistory));
-        return;
+      const user = auth.currentUser;
+      if (!user) return;
+      const cacheKey = `chat_history_${user.uid}`;
+      try {
+        const cached = localStorage.getItem(cacheKey);
+        if (cached) {
+          const parsed = JSON.parse(cached);
+          if (Array.isArray(parsed) && !cancelled) {
+            setMessages(parsed.filter(item => item && (item.role === 'user' || item.role === 'model') && typeof item.text === 'string').slice(-100));
+            return;
+          }
+        }
+      } catch (error) {
+        console.warn('Sohbet önbelleği okunamadı:', error);
       }
-
-      const q = query(
-        collection(db, 'chatMessages'),
-        where('userId', '==', auth.currentUser.uid),
-        orderBy('createdAt', 'asc')
-      );
-      const snapshot = await getDocs(q);
-      const hist = snapshot.docs.map(doc => doc.data() as Message);
-      if (hist.length > 0) {
-        setMessages(hist);
-        localStorage.setItem(`chat_history_${auth.currentUser.uid}`, JSON.stringify(hist));
+      try {
+        const q = query(collection(db, 'chatMessages'), where('userId', '==', user.uid), orderBy('createdAt', 'asc'));
+        const snapshot = await getDocs(q);
+        if (cancelled) return;
+        const history = snapshot.docs.map(item => item.data() as Message)
+          .filter(item => (item.role === 'user' || item.role === 'model') && typeof item.text === 'string').slice(-100);
+        if (history.length) {
+          setMessages(history);
+          try { localStorage.setItem(cacheKey, JSON.stringify(history)); } catch {}
+        }
+      } catch (error) {
+        console.warn('Sohbet geçmişi alınamadı, sohbet kullanılabilir:', error);
       }
     };
-    loadHistory();
+    void loadHistory();
+    return () => { cancelled = true; };
   }, [userProfile.displayName]);
   const [lastRagSources, setLastRagSources] = useState<string[]>([]);
   
