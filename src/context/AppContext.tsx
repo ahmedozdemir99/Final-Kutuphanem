@@ -729,6 +729,40 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     return () => unsubscribeAuth();
   }, []);
 
+  // Restore the signed-in user's own books after local hydration. Never replace local data
+  // with an empty or failed cloud response. This is additive to protect imported backups.
+  const [cloudRestoreReady, setCloudRestoreReady] = useState(false);
+  useEffect(() => {
+    if (!isHydrated || !currentUser || currentUser.isAnonymous) return;
+    let cancelled = false;
+    setCloudRestoreReady(false);
+    const restore = async () => {
+      try {
+        const snapshot = await getDocs(query(collection(db, 'userBooks'), where('userId', '==', currentUser.uid)));
+        if (cancelled) return;
+        const remoteBooks = snapshot.docs.map(item => item.data() as UserBook);
+        if (remoteBooks.length) {
+          setUserBooks(prev => {
+            const byId = new Map(prev.map(book => [book.id, book]));
+            remoteBooks.forEach(remote => {
+              const local = byId.get(remote.id);
+              if (!local || Date.parse(remote.updatedAt || '') > Date.parse(local.updatedAt || '')) {
+                byId.set(remote.id, remote);
+              }
+            });
+            return Array.from(byId.values());
+          });
+        }
+        setCloudRestoreReady(true);
+      } catch (error) {
+        console.warn('Buluttan geri yükleme başarısız; yerel arşiv korunuyor.', error);
+        if (!cancelled) setCloudSyncStatus('error');
+      }
+    };
+    restore();
+    return () => { cancelled = true; };
+  }, [isHydrated, currentUser?.uid]);
+
   // Periodic background auto-sync to Cloud and IndexedDB every 30 seconds + on visibilitychange/unload
   // Periodic auto-sync removed to drastically reduce Firestore read/write quota usage.
   // Sync now is strictly manual via UI trigger.
@@ -1585,12 +1619,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
       onProgress?.(90);
 
-      // Trigger cloud sync asynchronously in background without blocking the UI
-      if (auth.currentUser) {
-        setTimeout(() => {
-          syncAllDataToCloud().catch(e => console.warn("Background sync warning:", e));
-        }, 100);
-      }
+      // Imported data is saved locally. The next explicit cloud sync reports write failures.
 
       onProgress?.(100);
 
@@ -1617,12 +1646,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       };
     }
     isSyncingRef.current = true;
-
-    // Quota Management: Check if we are offline or likely to exceed quota
-    if (cloudSyncStatus === 'offline') {
-      isSyncingRef.current = false;
-      return { success: false, message: '⚠️ Bulut bağlantısı şu an kapalı. Yerel verileriniz güvendedir.' };
-    }
 
     const activeUser = auth.currentUser;
     if (!activeUser || activeUser.isAnonymous) {
