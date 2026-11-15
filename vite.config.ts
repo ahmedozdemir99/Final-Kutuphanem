@@ -12,17 +12,25 @@ export default defineConfig(() => {
       VitePWA({
         registerType: 'autoUpdate',
         injectRegister: null,
-        includeAssets: ['favicon.ico', 'apple-touch-icon.png', 'icon.svg'],
+        includeAssets: [
+          'favicon.ico',
+          'favicon.png',
+          'apple-touch-icon.png',
+          'icon-192.png',
+          'icon-512.png',
+          'pwa-maskable-192x192.png',
+          'pwa-maskable-512x512.png',
+        ],
         manifest: {
-          id: '/?v=6',
+          id: '/',
           name: 'Dijital Kütüphanem',
           short_name: 'Kütüphanem',
           description: 'Premium Personal Library & Lifelong Learning System',
-          theme_color: '#742C3C',
+          theme_color: '#440405',
           background_color: '#F8F5EF',
-          display: 'minimal-ui',
+          display: 'standalone',
           orientation: 'portrait',
-          start_url: '/?source=pwa',
+          start_url: '/',
           scope: '/',
           icons: [
             {
@@ -38,59 +46,53 @@ export default defineConfig(() => {
               purpose: 'any',
             },
             {
-              src: '/icon-192.png',
+              src: '/pwa-maskable-192x192.png',
               sizes: '192x192',
               type: 'image/png',
               purpose: 'maskable',
             },
             {
-              src: '/icon-512.png',
+              src: '/pwa-maskable-512x512.png',
               sizes: '512x512',
               type: 'image/png',
               purpose: 'maskable',
             },
-            {
-              src: '/icon.png',
-              sizes: '1024x1024',
-              type: 'image/png',
-              purpose: 'maskable',
-            }
           ],
           shortcuts: [
             {
-              name: 'Canlı Masaüstü Widget\'ı',
+              name: "Canlı Masaüstü Widget'ı",
               short_name: 'Widget',
               description: 'Günün Vecizesi & Canlı Okuma Takip Widgetı',
               url: '/?widget=true',
-              icons: [{ src: '/icon-192.png', sizes: '192x192' }]
+              icons: [{ src: '/icon-192.png', sizes: '192x192', type: 'image/png' }],
             },
             {
               name: 'Günün Vecizesi & Hikmeti',
               short_name: 'Günün Vecizesi',
               description: 'Günün vecizesi ve hikmetli sözü',
               url: '/?tab=today&action=wisdom',
-              icons: [{ src: '/icon-192.png', sizes: '192x192' }]
+              icons: [{ src: '/icon-192.png', sizes: '192x192', type: 'image/png' }],
             },
             {
-              name: 'Kur\'an-ı Kerim',
-              short_name: 'Kur\'an-ı Kerim',
-              description: 'Kur\'an-ı Kerim okuma ve dinleme',
+              name: "Kur'an-ı Kerim",
+              short_name: "Kur'an-ı Kerim",
+              description: "Kur'an-ı Kerim okuma ve dinleme",
               url: '/?tab=explore&sub=quran',
-              icons: [{ src: '/icon-192.png', sizes: '192x192' }]
-            }
+              icons: [{ src: '/icon-192.png', sizes: '192x192', type: 'image/png' }],
+            },
           ],
           widgets: [
             {
-              name: "Dijital Kütüphanem Canlı Widget",
-              short_name: "Kütüphanem Widget",
-              description: "Günün Vecizesi & Günlük Okuma Takibi",
-              tag: "reading-widget",
-              template: "reading-widget",
-              data: "/?widget=true",
-              type: "text/html",
-              icons: [{ src: "/icon-192.png", sizes: "192x192" }]
-            }
-          ]
+              name: 'Dijital Kütüphanem Canlı Widget',
+              short_name: 'Kütüphanem Widget',
+              description: 'Günün Vecizesi & Günlük Okuma Takibi',
+              tag: 'reading-widget',
+              template: 'reading-widget',
+              data: '/?widget=true',
+              type: 'text/html',
+              icons: [{ src: '/icon-192.png', sizes: '192x192', type: 'image/png' }],
+            },
+          ],
         } as any,
         workbox: {
           maximumFileSizeToCacheInBytes: 5 * 1024 * 1024, // 5MB limit

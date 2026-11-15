@@ -1,11 +1,11 @@
-import React, { createContext, useContext, useState, useEffect } from 'react';
-import { onAuthStateChanged, signInAnonymously, User as FirebaseUser } from 'firebase/auth';
-import { collection, doc, setDoc, deleteDoc, query, where, getDocs } from 'firebase/firestore';
+import React, { createContext, useContext, useState, useEffect, useRef } from 'react';
+import { onAuthStateChanged, User as FirebaseUser } from 'firebase/auth';
+import { doc, getDoc, setDoc, deleteDoc } from 'firebase/firestore';
 import { BookReview, BookStatus, MainTab, Quotation, ReadingSession, UserBook, UserProfile, VocabularyItem, QuranProgress, AppNotification, Badge } from '../types';
 import { DEFAULT_USER_BOOKS, DEFAULT_BOOK_COVERS, MAIN_CATEGORIES, inferCategoryForBook } from '../data/catalogData';
 import { PERMANENT_BOOKS } from '../data/permanentBooks';
-import { auth, db, loginWithGoogle } from '../lib/firebase';
-import { saveBookFileToIDB, getBookFileFromIDB, saveCoverToIDB, getCoverFromIDB, saveAppDataToIDB, getAppDataFromIDB, deleteBookDataFromIDB } from '../lib/indexedDb';
+import { auth, db, loginWithGoogle, handleFirestoreError, OperationType } from '../lib/firebase';
+import { saveBookFileToIDB, getBookFileFromIDB, saveCoverToIDB, getCoverFromIDB, saveAppDataToIDB, getAppDataFromIDB, deleteBookDataFromIDB, requestPersistentStorage } from '../lib/indexedDb';
 import { validateBackupJSON, ValidationResult } from '../lib/jsonValidator';
 import { AVAILABLE_BADGES } from '../data/badgeData';
 import { compressImageDataUrl } from '../utils/imageUtils';
@@ -77,7 +77,9 @@ interface AppContextType {
   // Backup & Data Sync
   exportUserDataJSON: () => string;
   importUserDataJSON: (jsonString: string, onProgress?: (progress: number) => void) => Promise<{ success: boolean; validation?: ValidationResult; message: string }>;
-  syncAllDataToCloud: (onProgress?: (progress: number) => void) => Promise<{ success: boolean; message: string }>;
+  syncAllDataToCloud: (onProgress?: (progress: number) => void, forceSync?: boolean) => Promise<{ success: boolean; message: string }>;
+  restoreFromCloud: (uidOverride?: string) => Promise<{ success: boolean; message: string; restoredBooks?: number }>;
+  storagePersisted: boolean;
   deduplicateBooks: () => number;
   verifyDataIntegrity: () => { totalBooks: number; totalSessions: number; totalQuotes: number; totalWords: number; integrityOk: boolean };
   newBadgeNotification: Badge | null;
@@ -176,8 +178,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const [currentUser, setCurrentUser] = useState<FirebaseUser | null>(null);
   const [cloudSyncStatus, setCloudSyncStatus] = useState<'synced' | 'syncing' | 'offline' | 'error'>('offline');
   const [isHydrated, setIsHydrated] = useState<boolean>(false);
+  const [storagePersisted, setStoragePersisted] = useState<boolean>(false);
+  const hasCheckedCloudRestoreRef = useRef<string | null>(null);
 
-  // Helper for safe LocalStorage operations without unhandled QuotaExceededError exceptions
+  // Helper for safe LocalStorage operations without unhandled QuotaExceededError exceptions.
+  // Never store base64 data:image strings inside localStorage (5MB limit); keep them solely in IndexedDB.
   const safeLocalStorageSet = (key: string, value: any) => {
     try {
       let payload = value;
@@ -187,9 +192,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           const copy = { ...b };
           delete copy.fileData;
           delete copy.fileStorageUrl;
-          // Protect localStorage quota only on extremely oversized raw base64 (>800KB)
-          if (typeof copy.coverUrl === 'string' && copy.coverUrl.startsWith('data:') && copy.coverUrl.length > 800000) {
-            copy.coverUrl = ''; 
+          if (typeof copy.coverUrl === 'string' && copy.coverUrl.startsWith('data:')) {
+            copy.coverUrl = '';
+            if (!copy.coverSource) copy.coverSource = 'embedded';
           }
           return copy;
         });
@@ -205,14 +210,17 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       // In IndexedDB we save the full value completely intact with all covers
       saveAppDataToIDB(key, value);
     } catch {
-      // LocalStorage quota fallback: keep metadata intact and save to IndexedDB
+      // LocalStorage quota fallback: store ultra-compact metadata in localStorage and full data in IndexedDB
       try {
         if (key === 'dk_user_books' && Array.isArray(value)) {
           const minimal = value.map((b: any) => {
             const copy = { ...b };
             delete copy.fileData;
             delete copy.fileStorageUrl;
-            if (typeof copy.coverUrl === 'string' && copy.coverUrl.startsWith('data:') && copy.coverUrl.length > 800000) {
+            if (typeof copy.description === 'string' && copy.description.length > 200) {
+              copy.description = copy.description.slice(0, 200);
+            }
+            if (typeof copy.coverUrl === 'string' && copy.coverUrl.startsWith('data:')) {
               copy.coverUrl = '';
             }
             return copy;
@@ -588,13 +596,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     safeLocalStorageSet('dk_quran_progress', quranProgress);
   }, [quranProgress, isHydrated]);
 
-  // Restore IndexedDB file, backup data & cover references on mount
+  // Restore IndexedDB file, backup data & cover references on mount + request persistent storage
   useEffect(() => {
     async function loadAllData() {
       try {
-        // Priority 1: Load from IndexedDB (most reliable for persistent storage)
-        // Priority 2: LocalStorage (already handled by initial state if available)
-        
+        requestPersistentStorage().then(persisted => {
+          setStoragePersisted(persisted);
+        }).catch(() => {});
+
         const [
           savedBooks, 
           savedSessions, 
@@ -602,7 +611,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           savedQuotes, 
           savedVocab, 
           savedQuran,
-          savedNotifs
+          savedNotifs,
+          savedProfile
         ] = await Promise.all([
           getAppDataFromIDB('dk_user_books'),
           getAppDataFromIDB('dk_reading_sessions'),
@@ -610,12 +620,22 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           getAppDataFromIDB('dk_quotations'),
           getAppDataFromIDB('dk_vocabulary'),
           getAppDataFromIDB('dk_quran_progress'),
-          getAppDataFromIDB('dk_notifications')
+          getAppDataFromIDB('dk_notifications'),
+          getAppDataFromIDB('dk_user_profile')
         ]);
 
-        const baseBooksToEnrich = (Array.isArray(savedBooks) && savedBooks.length >= PERMANENT_BOOKS.length)
-          ? savedBooks
-          : mergePermanentBooksWithExisting(Array.isArray(savedBooks) ? savedBooks : (userBooks.length > 0 ? userBooks : []));
+        let localBooks: UserBook[] = [];
+        try {
+          const rawLs = localStorage.getItem('dk_user_books');
+          if (rawLs) {
+            const parsedLs = JSON.parse(rawLs);
+            if (Array.isArray(parsedLs)) localBooks = parsedLs;
+          }
+        } catch {}
+
+        const idbBooks = Array.isArray(savedBooks) ? savedBooks : [];
+        const combinedSources = [...idbBooks, ...localBooks];
+        const baseBooksToEnrich = mergePermanentBooksWithExisting(combinedSources);
 
         const enriched = await Promise.all(
           baseBooksToEnrich.map(async (book: UserBook) => {
@@ -641,13 +661,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         );
         setUserBooks(enriched);
         safeLocalStorageSet('dk_user_books', enriched);
-        saveAppDataToIDB('dk_user_books', enriched);
         if (Array.isArray(savedSessions)) setReadingSessions(savedSessions);
         if (Array.isArray(savedReviews)) setReviews(savedReviews);
         if (Array.isArray(savedQuotes)) setQuotations(savedQuotes);
         if (Array.isArray(savedVocab)) setVocabulary(savedVocab);
         if (savedQuran && typeof savedQuran === 'object') setQuranProgress(savedQuran);
         if (Array.isArray(savedNotifs)) setNotifications(savedNotifs);
+        if (savedProfile && typeof savedProfile === 'object') {
+          setUserProfile(prev => ({ ...prev, ...savedProfile }));
+        }
 
         // Mark as hydrated so future state changes trigger saves
         setIsHydrated(true);
@@ -698,13 +720,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   }, [isHydrated]);
 
 
-  // Firebase Auth & Realtime Firestore Synchronization
+  // Firebase Auth listener: track real Google accounts cleanly and auto-restore cloud snapshot ONLY when local storage was wiped or on Google login
   useEffect(() => {
     const unsubscribeAuth = onAuthStateChanged(auth, (user) => {
       setCurrentUser(user);
       if (user) {
         setCloudSyncStatus('synced');
-        // Manual fetch only: No automatic fetch on auth load to save quota
         setUserProfile(prev => ({
           ...prev,
           uid: user.uid,
@@ -712,9 +733,18 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           email: user.email || prev.email,
           photoURL: user.photoURL || prev.photoURL
         }));
+
+        // If user signed in with a real Google account (not ephemeral anonymous) and we haven't checked cloud restore in this session
+        if (!user.isAnonymous && hasCheckedCloudRestoreRef.current !== user.uid) {
+          hasCheckedCloudRestoreRef.current = user.uid;
+          // Single-read check ONLY when local user has no restored backup yet or freshly signed in
+          const hasLocalRestore = !!localStorage.getItem('dk_last_backup_restore_at') || !!localStorage.getItem('dk_last_sync_time');
+          if (!hasLocalRestore) {
+            restoreFromCloud(user.uid).catch(() => {});
+          }
+        }
       } else {
-        // Automatically authenticate anonymously without fetching data
-        signInAnonymously(auth).catch(() => {});
+        setCloudSyncStatus('offline');
       }
     });
 
@@ -1441,6 +1471,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       let bookCount = 0;
       const incomingRaw = Array.isArray(data) ? data : (Array.isArray(data.userBooks) ? data.userBooks : null);
 
+      let importedBooksForSync: UserBook[] = userBooks;
       if (incomingRaw && incomingRaw.length > 0) {
         let idCounter = Date.now();
         const normalizedBooks = incomingRaw.map((b: any, index: number) => {
@@ -1502,85 +1533,97 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           }
         });
 
-        // Merge with existing books preserving user progress
-        setUserBooks(prev => {
-          const map = new Map<string, UserBook>();
-          prev.forEach(eb => {
-            const k = `${normalizeBookKey(eb.title)}___${normalizeBookKey(eb.author)}`;
-            map.set(k, eb);
-          });
-          normalizedBooks.forEach((nb: UserBook) => {
-            const k = `${normalizeBookKey(nb.title)}___${normalizeBookKey(nb.author)}`;
-            if (!map.has(k)) {
-              map.set(k, nb);
-            } else {
-              const target = map.get(k)!;
-              if (nb.currentPage > target.currentPage) target.currentPage = nb.currentPage;
-              if (nb.totalPages > target.totalPages) target.totalPages = nb.totalPages;
-              if (nb.userRating && !target.userRating) target.userRating = nb.userRating;
-              if (nb.userNotes) {
-                if (!target.userNotes) target.userNotes = nb.userNotes;
-                else if (!target.userNotes.includes(nb.userNotes)) target.userNotes += `\n${nb.userNotes}`;
-              }
-              if (nb.fileStorageUrl && !target.fileStorageUrl) {
-                target.fileStorageUrl = nb.fileStorageUrl;
-                target.fileName = nb.fileName;
-                target.fileType = nb.fileType;
-              }
-              if (nb.coverUrl && !nb.coverUrl.includes('placeholder')) {
-                if (!target.coverUrl || target.coverUrl.includes('placeholder') || nb.coverUrl.startsWith('data:')) {
-                  target.coverUrl = nb.coverUrl;
-                }
+        // Merge with existing books preserving user progress without mutating state in place
+        const permanentMap = new Map<string, UserBook>();
+        userBooks.forEach(eb => {
+          const k = `${normalizeBookKey(eb.title)}___${normalizeBookKey(eb.author)}`;
+          permanentMap.set(k, { ...eb });
+        });
+        normalizedBooks.forEach((nb: UserBook) => {
+          const k = `${normalizeBookKey(nb.title)}___${normalizeBookKey(nb.author)}`;
+          if (!permanentMap.has(k)) {
+            permanentMap.set(k, nb);
+          } else {
+            const target = { ...permanentMap.get(k)! };
+            if (nb.currentPage > target.currentPage) target.currentPage = nb.currentPage;
+            if (nb.totalPages > target.totalPages) target.totalPages = nb.totalPages;
+            if (nb.status && nb.status !== 'want_to_read') target.status = nb.status;
+            if (nb.userRating && !target.userRating) target.userRating = nb.userRating;
+            if (nb.userNotes) {
+              if (!target.userNotes) target.userNotes = nb.userNotes;
+              else if (!target.userNotes.includes(nb.userNotes)) target.userNotes += `\n${nb.userNotes}`;
+            }
+            if (nb.fileStorageUrl && !target.fileStorageUrl) {
+              target.fileStorageUrl = nb.fileStorageUrl;
+              target.fileName = nb.fileName;
+              target.fileType = nb.fileType;
+            }
+            if (nb.coverUrl && !nb.coverUrl.includes('placeholder')) {
+              if (!target.coverUrl || target.coverUrl.includes('placeholder') || nb.coverUrl.startsWith('data:')) {
+                target.coverUrl = nb.coverUrl;
               }
             }
-          });
-
-          const merged = Array.from(map.values());
-          saveAppDataToIDB('dk_user_books', merged);
-          safeLocalStorageSet('dk_user_books', merged);
-          return merged;
+            target.tags = Array.from(new Set([...(target.tags || []), ...(nb.tags || [])]));
+            permanentMap.set(k, target);
+          }
         });
 
-        setTimeout(() => {
-          deduplicateBooks();
-        }, 50);
+        const mergedBooks = mergeAndDeduplicateBooksList(Array.from(permanentMap.values()));
+        importedBooksForSync = mergedBooks;
+        setUserBooks(mergedBooks);
+        safeLocalStorageSet('dk_user_books', mergedBooks);
       }
 
       onProgress?.(60);
 
+      const importedProfile = (data.userProfile && typeof data.userProfile === 'object') ? { ...userProfile, ...data.userProfile } : userProfile;
+      if (data.userProfile && typeof data.userProfile === 'object') {
+        setUserProfile(importedProfile);
+        safeLocalStorageSet('dk_user_profile', importedProfile);
+      }
+      const importedSessions = Array.isArray(data.readingSessions) ? data.readingSessions : readingSessions;
       if (Array.isArray(data.readingSessions)) {
         setReadingSessions(data.readingSessions);
-        saveAppDataToIDB('dk_reading_sessions', data.readingSessions);
         safeLocalStorageSet('dk_reading_sessions', data.readingSessions);
       }
+      const importedReviews = Array.isArray(data.reviews) ? data.reviews : reviews;
       if (Array.isArray(data.reviews)) {
         setReviews(data.reviews);
-        saveAppDataToIDB('dk_reviews', data.reviews);
         safeLocalStorageSet('dk_reviews', data.reviews);
       }
+      const importedQuotations = Array.isArray(data.quotations) ? data.quotations : quotations;
       if (Array.isArray(data.quotations)) {
         setQuotations(data.quotations);
-        saveAppDataToIDB('dk_quotations', data.quotations);
         safeLocalStorageSet('dk_quotations', data.quotations);
       }
+      const importedVocabulary = Array.isArray(data.vocabulary) ? data.vocabulary : vocabulary;
       if (Array.isArray(data.vocabulary)) {
         setVocabulary(data.vocabulary);
-        saveAppDataToIDB('dk_vocabulary', data.vocabulary);
         safeLocalStorageSet('dk_vocabulary', data.vocabulary);
       }
+      const importedQuran = data.quranProgress || quranProgress;
       if (data.quranProgress) {
         setQuranProgress(data.quranProgress);
-        saveAppDataToIDB('dk_quran_progress', data.quranProgress);
         safeLocalStorageSet('dk_quran_progress', data.quranProgress);
       }
 
+      try {
+        localStorage.setItem('dk_last_backup_restore_at', new Date().toISOString());
+      } catch {}
+
       onProgress?.(90);
 
-      // Trigger cloud sync asynchronously in background without blocking the UI
-      if (auth.currentUser) {
-        setTimeout(() => {
-          syncAllDataToCloud().catch(e => console.warn("Background sync warning:", e));
-        }, 100);
+      // Immediately push single-document cloud snapshot with freshly imported state if signed in with Google
+      if (auth.currentUser && !auth.currentUser.isAnonymous) {
+        syncAllDataToCloud(undefined, true, {
+          userBooks: importedBooksForSync,
+          readingSessions: importedSessions,
+          reviews: importedReviews,
+          quotations: importedQuotations,
+          vocabulary: importedVocabulary,
+          quranProgress: importedQuran,
+          userProfile: importedProfile
+        }).catch(e => console.warn("Background sync warning:", e));
       }
 
       onProgress?.(100);
@@ -1588,7 +1631,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       return { 
         success: true, 
         validation,
-        message: `✅ Yedek doğrulaması başarılı! ${bookCount} eser, kapaklar, Kur'an ilerlemesi ve tüm arşiv yerel hafızaya aktarıldı.` 
+        message: `✅ Yedek doğrulaması başarılı! ${bookCount} eser, kapaklar, Kur'an ilerlemesi ve tüm arşiv kalıcı hafızaya aktarıldı.` 
       };
     } catch (err) {
       return { 
@@ -1600,7 +1643,90 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const isSyncingRef = React.useRef(false);
 
-  const syncAllDataToCloud = async (onProgress?: (progress: number) => void): Promise<{ success: boolean; message: string }> => {
+  // Extract compact snapshot containing only user progress/custom books + sessions/quotes/reviews/vocab/quran so the entire cloud backup fits in ONE Firestore write!
+  const buildCompactCloudSnapshot = (
+    uid: string,
+    override?: {
+      userBooks?: UserBook[];
+      readingSessions?: ReadingSession[];
+      reviews?: BookReview[];
+      quotations?: Quotation[];
+      vocabulary?: VocabularyItem[];
+      quranProgress?: QuranProgress;
+      userProfile?: UserProfile;
+    }
+  ) => {
+    const srcBooks = override?.userBooks ?? userBooks;
+    const srcSessions = override?.readingSessions ?? readingSessions;
+    const srcReviews = override?.reviews ?? reviews;
+    const srcQuotes = override?.quotations ?? quotations;
+    const srcVocab = override?.vocabulary ?? vocabulary;
+    const srcQuran = override?.quranProgress ?? quranProgress;
+    const srcProfile = override?.userProfile ?? userProfile;
+
+    const permanentDefaults = new Map<string, UserBook>();
+    PERMANENT_BOOKS.forEach(pb => {
+      permanentDefaults.set(`${normalizeBookKey(pb.title)}___${normalizeBookKey(pb.author)}`, pb);
+    });
+
+    const modifiedOrCustomBooks = mergeAndDeduplicateBooksList(srcBooks)
+      .filter(b => {
+        const key = `${normalizeBookKey(b.title)}___${normalizeBookKey(b.author)}`;
+        const def = permanentDefaults.get(key);
+        if (!def) return true; // user-added or imported custom book
+        return (
+          (b.currentPage || 0) > 0 ||
+          b.status !== def.status ||
+          (b.userRating || 0) > 0 ||
+          !!b.userNotes ||
+          (b.coverUrl && !b.coverUrl.startsWith('data:') && b.coverUrl !== def.coverUrl) ||
+          (Array.isArray(b.tags) && b.tags.length > (def.tags?.length || 0))
+        );
+      })
+      .map(b => {
+        const copy: any = { ...b, userId: uid };
+        delete copy.fileData;
+        delete copy.fileStorageUrl;
+        // Strip raw base64 covers to guarantee snapshot stays well under Firestore 1MB limit
+        if (typeof copy.coverUrl === 'string' && copy.coverUrl.startsWith('data:')) {
+          copy.coverUrl = '';
+        }
+        if (typeof copy.description === 'string' && copy.description.length > 260) {
+          copy.description = copy.description.slice(0, 260);
+        }
+        return copy;
+      });
+
+    return {
+      uid,
+      email: auth.currentUser?.email || srcProfile.email || 'okur@dijitalkutuphanem.com',
+      displayName: auth.currentUser?.displayName || srcProfile.displayName || 'Okur',
+      photoURL: auth.currentUser?.photoURL || srcProfile.photoURL || '',
+      snapshotVersion: '2.0',
+      updatedAt: new Date().toISOString(),
+      userProfile: cleanForFirestore(srcProfile),
+      quranProgress: cleanForFirestore(srcQuran),
+      readingSessions: cleanForFirestore(srcSessions.slice(0, 400)),
+      reviews: cleanForFirestore(srcReviews),
+      quotations: cleanForFirestore(srcQuotes),
+      vocabulary: cleanForFirestore(srcVocab),
+      customBooks: cleanForFirestore(modifiedOrCustomBooks)
+    };
+  };
+
+  const syncAllDataToCloud = async (
+    onProgress?: (progress: number) => void,
+    forceSync: boolean = false,
+    overrideData?: {
+      userBooks?: UserBook[];
+      readingSessions?: ReadingSession[];
+      reviews?: BookReview[];
+      quotations?: Quotation[];
+      vocabulary?: VocabularyItem[];
+      quranProgress?: QuranProgress;
+      userProfile?: UserProfile;
+    }
+  ): Promise<{ success: boolean; message: string }> => {
     if (isSyncingRef.current) {
       return { 
         success: true, 
@@ -1609,14 +1735,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
     isSyncingRef.current = true;
 
-    // Quota Management: Check if we are offline or likely to exceed quota
-    if (cloudSyncStatus === 'offline') {
-      isSyncingRef.current = false;
-      return { success: false, message: '⚠️ Bulut bağlantısı şu an kapalı. Yerel verileriniz güvendedir.' };
-    }
-
     let activeUser = auth.currentUser;
-    if (!activeUser) {
+    if (!activeUser || activeUser.isAnonymous) {
       try {
         activeUser = await loginWithGoogle();
       } catch {
@@ -1624,106 +1744,125 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       }
     }
 
-    const uid = activeUser?.uid || (typeof window !== 'undefined' ? (localStorage.getItem('dk_persistent_uid') || 'guest_user') : 'guest_user');
-    
-    // Check if enough changes exist to justify a sync call, or just skip if small changes
-    // to save read/write quota for important updates
+    if (!activeUser || !auth.currentUser || auth.currentUser.isAnonymous) {
+      isSyncingRef.current = false;
+      return {
+        success: false,
+        message: '⚠️ Kalıcı bulut eşitlemesi için Google hesabınızla giriş yapın. Yerel verileriniz cihazda kaydedildi.'
+      };
+    }
+
+    const uid = auth.currentUser.uid;
     const lastSyncStr = localStorage.getItem('dk_last_sync_time');
     const nowMs = Date.now();
-    if (lastSyncStr && (nowMs - parseInt(lastSyncStr) < 1000 * 60 * 15)) {
+    if (!forceSync && lastSyncStr && (nowMs - parseInt(lastSyncStr, 10) < 1000 * 60 * 5)) {
       isSyncingRef.current = false;
-      return { success: true, message: '✅ Verileriniz zaten güncel.' };
+      return { success: true, message: '✅ Bulut yedeğiniz zaten güncel.' };
     }
 
     setCloudSyncStatus('syncing');
-    onProgress?.(20);
+    onProgress?.(25);
 
     try {
-      onProgress?.(30);
-
-      const cleanBooks = mergeAndDeduplicateBooksList(userBooks);
-      setUserBooks(cleanBooks);
-
-      // Pre-process cover images asynchronously BEFORE creating write batches
-      const preparedBooks = await Promise.all(
-        cleanBooks.map(async (book) => {
-          const raw = { ...book, userId: uid };
-          delete raw.fileData;
-          delete raw.fileStorageUrl;
-          if (typeof raw.coverUrl === 'string' && raw.coverUrl.startsWith('data:')) {
-            if (raw.coverUrl.length > 300000) {
-              try {
-                raw.coverUrl = await compressImageDataUrl(raw.coverUrl, 500, 750, 0.7);
-              } catch {}
-            }
-            if (raw.coverUrl.length > 800000) {
-              raw.coverUrl = '';
-            }
-          }
-          return raw;
-        })
-      );
-
-      onProgress?.(50);
-
-      const allOps: { ref: any; data: any }[] = [];
-
-      preparedBooks.forEach(rawBook => {
-        allOps.push({ ref: doc(db, 'userBooks', rawBook.id), data: cleanForFirestore(rawBook) });
-      });
-
-      readingSessions.forEach(session => {
-        allOps.push({ ref: doc(db, 'readingSessions', session.id), data: cleanForFirestore({ ...session, userId: uid }) });
-      });
-
-      reviews.forEach(rev => {
-        allOps.push({ ref: doc(db, 'reviews', rev.id), data: cleanForFirestore({ ...rev, userId: uid }) });
-      });
-
-      quotations.forEach(q => {
-        allOps.push({ ref: doc(db, 'quotations', q.id), data: cleanForFirestore({ ...q, userId: uid }) });
-      });
-
-      vocabulary.forEach(v => {
-        allOps.push({ ref: doc(db, 'vocabulary', v.id), data: cleanForFirestore({ ...v, userId: uid }) });
-      });
-
-      if (quranProgress) {
-        allOps.push({ ref: doc(db, 'quranProgress', uid), data: cleanForFirestore(quranProgress) });
+      let snapshot = buildCompactCloudSnapshot(uid, overrideData);
+      let serialized = JSON.stringify(snapshot);
+      // Safety trim if user has thousands of custom books
+      if (serialized.length > 880000 && Array.isArray(snapshot.customBooks)) {
+        snapshot.customBooks = snapshot.customBooks.map((b: any) => ({ ...b, description: '' }));
+        serialized = JSON.stringify(snapshot);
       }
 
-      onProgress?.(80);
-
-      // Safely write all documents resiliently in parallel chunks using safeFirestoreSet
-      // Reduced chunk size for safer quota usage
-      const chunkSize = 10;
-      for (let i = 0; i < allOps.length; i += chunkSize) {
-        const chunk = allOps.slice(i, i + chunkSize);
-        await Promise.allSettled(chunk.map(op => safeFirestoreSet(op.ref, op.data)));
-      }
+      onProgress?.(65);
+      // Single atomic Firestore write (1 write unit instead of 550+ writes!)
+      await setDoc(doc(db, 'users', uid), snapshot, { merge: true });
 
       localStorage.setItem('dk_last_sync_time', String(nowMs));
       onProgress?.(100);
       setCloudSyncStatus('synced');
       return { 
         success: true, 
-        message: `✅ Buluta eşitleme başarılı!` 
+        message: `✅ Tüm yedeğiniz tek pakette Google bulut hesabınıza kalıcı olarak eşitlendi!` 
       };
     } catch (err: any) {
-      if (err?.code === 'resource-exhausted') {
-        console.warn("Firestore quota exceeded.");
+      handleFirestoreError(err, OperationType.WRITE, `users/${uid}`);
+      if (err?.code === 'resource-exhausted' || String(err?.message).includes('Quota limit exceeded')) {
         setCloudSyncStatus('offline');
-        return { success: false, message: '⚠️ Günlük bulut kotası doldu. Verileriniz yerel cihazınızda güvendedir.' };
+        return { success: false, message: '⚠️ Günlük Firestore kotası doldu. Verileriniz cihazınızda güvenle korunuyor; yarın otomatik devam edilebilir.' };
       }
-      console.warn("Cloud sync warning:", err);
-      onProgress?.(100);
-      setCloudSyncStatus('synced');
+      setCloudSyncStatus('error');
       return { 
-        success: true, 
-        message: `✅ Verileriniz yerel olarak güvenle kaydedildi.` 
+        success: false, 
+        message: `⚠️ Bulut eşitlemesi tamamlanamadı (${err?.message || 'bağlantı hatası'}), yerel veriler güvende.` 
       };
     } finally {
       isSyncingRef.current = false;
+    }
+  };
+
+  const restoreFromCloud = async (uidOverride?: string): Promise<{ success: boolean; message: string; restoredBooks?: number }> => {
+    const uid = uidOverride || auth.currentUser?.uid;
+    if (!uid || (auth.currentUser?.isAnonymous && !uidOverride)) {
+      return { success: false, message: '⚠️ Buluttan geri yüklemek için Google hesabınızla giriş yapın.' };
+    }
+
+    try {
+      const snap = await getDoc(doc(db, 'users', uid));
+      if (!snap.exists()) {
+        return { success: false, message: 'Bu Google hesabında henüz bulut yedeği bulunamadı. Önce "Buluta Şimdi Senkronize Et"e basın.' };
+      }
+
+      const data = snap.data() as any;
+      if (!data || !data.snapshotVersion) {
+        return { success: false, message: 'Bulut kaydı bulundu ancak henüz tam kütüphane yedeği yüklenmemiş.' };
+      }
+
+      let restoredCount = 0;
+      if (Array.isArray(data.customBooks)) {
+        const merged = mergeAndDeduplicateBooksList(userBooks, data.customBooks);
+        setUserBooks(merged);
+        safeLocalStorageSet('dk_user_books', merged);
+        restoredCount = data.customBooks.length;
+      }
+
+      if (Array.isArray(data.readingSessions)) {
+        setReadingSessions(data.readingSessions);
+        safeLocalStorageSet('dk_reading_sessions', data.readingSessions);
+      }
+      if (Array.isArray(data.reviews)) {
+        setReviews(data.reviews);
+        safeLocalStorageSet('dk_reviews', data.reviews);
+      }
+      if (Array.isArray(data.quotations)) {
+        setQuotations(data.quotations);
+        safeLocalStorageSet('dk_quotations', data.quotations);
+      }
+      if (Array.isArray(data.vocabulary)) {
+        setVocabulary(data.vocabulary);
+        safeLocalStorageSet('dk_vocabulary', data.vocabulary);
+      }
+      if (data.quranProgress && typeof data.quranProgress === 'object') {
+        setQuranProgress(data.quranProgress);
+        safeLocalStorageSet('dk_quran_progress', data.quranProgress);
+      }
+      if (data.userProfile && typeof data.userProfile === 'object') {
+        const mergedProf = { ...userProfile, ...data.userProfile };
+        setUserProfile(mergedProf);
+        safeLocalStorageSet('dk_user_profile', mergedProf);
+      }
+
+      localStorage.setItem('dk_last_backup_restore_at', new Date().toISOString());
+      setCloudSyncStatus('synced');
+      return {
+        success: true,
+        restoredBooks: restoredCount,
+        message: `✅ Bulut yedeğiniz başarıyla geri yüklendi (${restoredCount} özel/ilerlemeli kitap ve tüm arşiv).`
+      };
+    } catch (err: any) {
+      handleFirestoreError(err, OperationType.GET, `users/${uid}`);
+      return {
+        success: false,
+        message: `⚠️ Buluttan geri yükleme başarısız: ${err?.message || 'Bağlantı/kota hatası'}`
+      };
     }
   };
 
@@ -1798,6 +1937,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         exportUserDataJSON,
         importUserDataJSON,
         syncAllDataToCloud,
+        restoreFromCloud,
+        storagePersisted,
         verifyDataIntegrity,
         newBadgeNotification,
         setNewBadgeNotification,

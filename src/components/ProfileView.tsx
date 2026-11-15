@@ -26,6 +26,8 @@ export const ProfileView: React.FC = () => {
     exportUserDataJSON, 
     importUserDataJSON, 
     syncAllDataToCloud,
+    restoreFromCloud,
+    storagePersisted,
     deduplicateBooks,
     cloudSyncStatus,
     verifyDataIntegrity,
@@ -38,6 +40,7 @@ export const ProfileView: React.FC = () => {
   const [importStatusMessage, setImportStatusMessage] = useState<{ success: boolean; message: string; validation?: ValidationResult } | null>(null);
   const [integrityResult, setIntegrityResult] = useState<ReturnType<typeof verifyDataIntegrity> | null>(null);
   const [isManualSyncing, setIsManualSyncing] = useState<boolean>(false);
+  const [isCloudRestoring, setIsCloudRestoring] = useState<boolean>(false);
   const [newReminderTime, setNewReminderTime] = useState<string>('12:00');
   const [testNotificationFeedback, setTestNotificationFeedback] = useState<{
     type: 'success' | 'error' | 'webview' | 'info';
@@ -52,6 +55,7 @@ export const ProfileView: React.FC = () => {
   const [dedupFeedback, setDedupFeedback] = useState<string | null>(null);
 
   const currentUser = auth.currentUser;
+  const isGoogleLinked = !!(currentUser && !currentUser.isAnonymous);
 
   const handleCleanDuplicates = () => {
     const removed = deduplicateBooks();
@@ -166,21 +170,25 @@ export const ProfileView: React.FC = () => {
     setAuthErrorMsg(null);
 
     try {
-      if (currentUser) {
+      if (isGoogleLinked) {
         await logoutUser();
       } else {
         const user = await loginWithGoogle();
-        if (user) {
+        if (user && !user.isAnonymous) {
           setUserProfile(prev => ({
             ...prev,
             displayName: user.displayName || prev.displayName || 'Bulut Okuru',
             email: user.email || prev.email || 'okur@dijitalkutuphanem.org',
             photoURL: user.photoURL || undefined
           }));
-          const syncRes = await syncAllDataToCloud();
+          const syncRes = await syncAllDataToCloud(undefined, true);
           if (syncRes.success) {
             setAuthErrorMsg(null);
+          } else {
+            setAuthErrorMsg(syncRes.message);
           }
+        } else {
+          setAuthErrorMsg('Google giriş penceresi açılamadı veya iptal edildi. Uygulama içinden açtıysanız sağ üstten Google Chrome ile açıp tekrar deneyin.');
         }
       }
     } catch (err: any) {
@@ -196,7 +204,7 @@ export const ProfileView: React.FC = () => {
     try {
       const res = await syncAllDataToCloud((prog) => {
         setSyncProgress(prog);
-      });
+      }, true);
       setIsManualSyncing(false);
       setImportStatusMessage({
         success: res.success,
@@ -214,6 +222,28 @@ export const ProfileView: React.FC = () => {
       setTimeout(() => {
         setImportStatusMessage(null);
       }, 8000);
+    }
+  };
+
+  const handleCloudRestore = async () => {
+    setIsCloudRestoring(true);
+    setImportStatusMessage(null);
+    try {
+      const res = await restoreFromCloud();
+      setImportStatusMessage({
+        success: res.success,
+        message: res.message
+      });
+      setTimeout(() => {
+        setImportStatusMessage(null);
+      }, 9000);
+    } catch (err: any) {
+      setImportStatusMessage({
+        success: false,
+        message: `Buluttan geri yükleme hatası: ${err?.message || 'Bilinmeyen hata'}`
+      });
+    } finally {
+      setIsCloudRestoring(false);
     }
   };
 
@@ -363,11 +393,11 @@ export const ProfileView: React.FC = () => {
                   {currentUser?.displayName || userProfile.displayName}
                 </h1>
                 <span className={`px-2.5 py-0.5 rounded-full text-[10px] font-bold ${
-                  currentUser ? 'bg-emerald-500/10 text-emerald-600' : 'bg-amber-500/10 text-amber-600'
+                  isGoogleLinked ? 'bg-emerald-500/10 text-emerald-600' : 'bg-amber-500/10 text-amber-600'
                 }`}>
-                  {currentUser ? 'Firebase Bulut Etkin' : 'Yerel Cihaz Hesabı'}
+                  {isGoogleLinked ? 'Google Bulut Bağlı' : 'Yerel Cihaz Hesabı'}
                 </span>
-                {!currentUser && (
+                {!isGoogleLinked && (
                   <button 
                     onClick={() => {
                       setTempDisplayName(userProfile.displayName || '');
@@ -391,7 +421,7 @@ export const ProfileView: React.FC = () => {
           onClick={handleGoogleAuth}
           className="px-4 py-2.5 rounded-xl bg-[#742C3C] text-white text-xs font-semibold hover:bg-[#4B1E2B] transition-colors flex items-center gap-2 shrink-0 shadow-md"
         >
-          {currentUser ? (
+          {isGoogleLinked ? (
             <>
               <LogOut className="w-4 h-4 text-[#B79A63]" />
               <span>Çıkış Yap</span>
@@ -399,11 +429,23 @@ export const ProfileView: React.FC = () => {
           ) : (
             <>
               <LogIn className="w-4 h-4 text-[#B79A63]" />
-              <span>Google ile Bulut Senkronizasyonu</span>
+              <span>Google ile Kalıcı Bulut Bağla</span>
             </>
           )}
         </button>
       </div>
+
+      {authErrorMsg && (
+        <div className="p-3.5 rounded-2xl bg-amber-500/15 text-amber-900 dark:text-amber-200 border border-amber-500/30 text-xs font-medium flex items-center justify-between gap-2">
+          <span>{authErrorMsg}</span>
+          <button
+            onClick={() => setAuthErrorMsg(null)}
+            className="text-[11px] font-bold px-2 py-0.5 rounded hover:bg-black/5"
+          >
+            Kapat
+          </button>
+        </div>
+      )}
 
       {/* Accordion 0: Günlük Okuma Hatırlatıcıları */}
       <div className="bg-white dark:bg-[#1E1E1E] rounded-3xl overflow-hidden shadow-md border border-black/5 dark:border-white/5 transition-all">
@@ -617,25 +659,34 @@ export const ProfileView: React.FC = () => {
           <div className="p-6 pt-0 border-t border-black/5 dark:border-white/5 space-y-6 animate-in fade-in duration-200">
             {/* Cloud Status */}
             <div className="p-4 rounded-2xl bg-[#F8F5EF] dark:bg-[#141414] border border-black/5 space-y-2 pt-4">
-              <div className="flex justify-between items-center">
+              <div className="flex flex-wrap justify-between items-center gap-2">
                 <span className="text-xs font-semibold text-slate-700 dark:text-slate-300 flex items-center gap-2">
                   <Cloud className="w-4 h-4 text-[#742C3C] dark:text-[#B79A63]" />
-                  <span>Firestore Veritabanı Kalıcılık Durumu</span>
+                  <span>Kalıcı Hafıza ve Bulut Eşitleme Durumu</span>
                 </span>
-                <span className={`text-xs font-bold px-2.5 py-0.5 rounded-full ${
-                  cloudSyncStatus === 'synced' ? 'bg-emerald-500/10 text-emerald-600' :
-                  cloudSyncStatus === 'syncing' ? 'bg-amber-500/10 text-amber-600' : 'bg-gray-500/10 text-gray-500'
-                }`}>
-                  {cloudSyncStatus === 'synced' ? 'Eşitlendi (Firestore Active)' : cloudSyncStatus === 'syncing' ? 'Eşitleniyor...' : 'Yerel Cihaz Ön Önbelleği'}
-                </span>
+                <div className="flex items-center gap-1.5 flex-wrap">
+                  <span className={`text-[11px] font-bold px-2.5 py-0.5 rounded-full ${
+                    storagePersisted ? 'bg-emerald-500/10 text-emerald-600' : 'bg-amber-500/10 text-amber-600'
+                  }`}>
+                    {storagePersisted ? 'Tarayıcı Hafızası Korumalı ✓' : 'Standart Tarayıcı Hafızası'}
+                  </span>
+                  <span className={`text-[11px] font-bold px-2.5 py-0.5 rounded-full ${
+                    isGoogleLinked && cloudSyncStatus === 'synced' ? 'bg-emerald-500/10 text-emerald-600' :
+                    cloudSyncStatus === 'syncing' ? 'bg-amber-500/10 text-amber-600' : 'bg-gray-500/10 text-gray-500'
+                  }`}>
+                    {isGoogleLinked && cloudSyncStatus === 'synced' ? 'Google Bulut Aktif' : cloudSyncStatus === 'syncing' ? 'Eşitleniyor...' : 'Yalnızca Cihazda'}
+                  </span>
+                </div>
               </div>
-              <p className="text-xs text-slate-500">
-                Geri yüklenen veya eklenen tüm kitap kapakları, sayfa konumları ve alıntılar Firestore üzerinde güvenle saklanır.
+              <p className="text-xs text-slate-500 leading-relaxed">
+                {isGoogleLinked
+                  ? 'Google hesabınız bağlı. Tek tıkla tüm kütüphaneniz, sayfa ilerlemeleriniz ve alıntılarınız tek pakette buluta kaydedilir; tarayıcı temizlense bile otomatik geri yüklenir.'
+                  : 'Önemli: Google hesabınızı bağlamadan yüklenen yedekler yalnızca tarayıcı hafızasında tutulur ve Android/Chrome önbellek temizliği yaptığında birkaç gün sonra silinebilir. Kalıcı koruma için Google ile bağlanın.'}
               </p>
 
               <div className="pt-2 flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-2">
                 <span className="text-[11px] text-slate-500">
-                  {currentUser ? 'Google Hesabınız bağlı.' : 'Hesabınız bağlı değil; yerel veriler cihazda saklanır.'}
+                  {isGoogleLinked ? `Bağlı hesap: ${currentUser?.email || userProfile.email}` : 'Kalıcı bulut koruması için Google ile bağlanın.'}
                 </span>
                 <div className="flex flex-wrap items-center gap-2">
                   <button
@@ -646,22 +697,32 @@ export const ProfileView: React.FC = () => {
                     <Sparkles className="w-3.5 h-3.5 text-amber-200" />
                     <span>Mükerrer Eserleri Temizle</span>
                   </button>
-                  {currentUser ? (
-                    <button
-                      onClick={handleManualSync}
-                      disabled={isManualSyncing}
-                      className="px-3.5 py-2 rounded-xl bg-[#742C3C] text-white text-xs font-semibold hover:bg-[#4B1E2B] transition-colors flex items-center justify-center gap-1.5 shadow-sm active:scale-95 disabled:opacity-80"
-                    >
-                      <RefreshCw className={`w-3.5 h-3.5 ${isManualSyncing ? 'animate-spin' : ''}`} />
-                      <span>{isManualSyncing ? `Buluta Aktarılıyor: %${syncProgress}` : 'Buluta Şimdi Senkronize Et'}</span>
-                    </button>
+                  {isGoogleLinked ? (
+                    <>
+                      <button
+                        onClick={handleManualSync}
+                        disabled={isManualSyncing}
+                        className="px-3.5 py-2 rounded-xl bg-[#742C3C] text-white text-xs font-semibold hover:bg-[#4B1E2B] transition-colors flex items-center justify-center gap-1.5 shadow-sm active:scale-95 disabled:opacity-80"
+                      >
+                        <RefreshCw className={`w-3.5 h-3.5 ${isManualSyncing ? 'animate-spin' : ''}`} />
+                        <span>{isManualSyncing ? `Buluta Aktarılıyor: %${syncProgress}` : 'Buluta Şimdi Senkronize Et'}</span>
+                      </button>
+                      <button
+                        onClick={handleCloudRestore}
+                        disabled={isCloudRestoring}
+                        className="px-3.5 py-2 rounded-xl bg-emerald-700 text-white text-xs font-semibold hover:bg-emerald-800 transition-colors flex items-center justify-center gap-1.5 shadow-sm active:scale-95 disabled:opacity-80"
+                      >
+                        <Download className={`w-3.5 h-3.5 ${isCloudRestoring ? 'animate-spin' : ''}`} />
+                        <span>{isCloudRestoring ? 'Geri Yükleniyor...' : 'Buluttan Geri Yükle'}</span>
+                      </button>
+                    </>
                   ) : (
                     <button
                       onClick={handleGoogleAuth}
                       className="px-3.5 py-2 rounded-xl bg-[#742C3C] text-white text-xs font-semibold hover:bg-[#4B1E2B] transition-colors flex items-center justify-center gap-1.5 shadow-sm active:scale-95"
                     >
                       <LogIn className="w-3.5 h-3.5 text-[#B79A63]" />
-                      <span>Google ile Bağlan ve Eşitle</span>
+                      <span>Google ile Bağlan ve Kalıcı Koru</span>
                     </button>
                   )}
                 </div>

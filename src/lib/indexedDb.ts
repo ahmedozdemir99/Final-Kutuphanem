@@ -213,3 +213,21 @@ export async function deleteBookDataFromIDB(bookId: string): Promise<void> {
     console.warn("IndexedDB Delete Book Data Error:", err);
   }
 }
+
+export async function requestPersistentStorage(): Promise<boolean> {
+  try {
+    if (typeof navigator !== 'undefined' && navigator.storage) {
+      if (typeof navigator.storage.persisted === 'function') {
+        const already = await navigator.storage.persisted();
+        if (already) return true;
+      }
+      if (typeof navigator.storage.persist === 'function') {
+        return await navigator.storage.persist();
+      }
+    }
+  } catch (err) {
+    console.warn('Persistent storage request warning:', err);
+  }
+  return false;
+}
+

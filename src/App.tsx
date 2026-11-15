@@ -97,6 +97,11 @@ function MainAppContent() {
             onClick={() => setActiveTab('today')}
             className="flex items-center gap-2 cursor-pointer group shrink-0"
           >
+            <img
+              src="/icon-192.png"
+              alt="Dijital Kütüphanem"
+              className="w-7 h-7 md:w-8 md:h-8 rounded-lg shadow-sm shrink-0 object-cover"
+            />
             <span className="font-serif-title font-bold text-base md:text-xl tracking-tight text-[#742C3C] dark:text-[#B79A63] whitespace-nowrap">
               Dijital Kütüphanem
             </span>
@@ -150,6 +155,8 @@ function MainAppContent() {
 
           {/* Right Header Action Controls */}
           <div className="flex items-center gap-2 shrink-0">
+            <PWAInstallButton />
+
             {/* Prominent Gece / Gündüz Modu Toggle Button */}
             <button
               onClick={toggleTheme}

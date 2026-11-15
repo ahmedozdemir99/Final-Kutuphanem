@@ -1,4 +1,4 @@
-import { Poet, Poem } from '../types';
+import type { Poet, Poem } from '../types/index.ts';
 
 export const POETS_COLLECTION_FULL: Poet[] = [
   {

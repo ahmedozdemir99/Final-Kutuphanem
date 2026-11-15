@@ -1,6 +1,5 @@
 import 'dotenv/config';
 import express from 'express';
-import { createServer as createViteServer } from 'vite';
 import { GoogleGenAI } from '@google/genai';
 import fs from 'fs';
 import path from 'path';
@@ -640,6 +639,8 @@ Lütfen bu aşamaya dair derinlikli, edebi ve felsefi bir "Bölüm & İlerleme A
     });
   } else {
     try {
+      // Dynamically import Vite only in dev mode so production startup in Cloud Run is instant
+      const { createServer: createViteServer } = await import('vite');
       // Create Vite server in middleware mode with HMR disabled to prevent iframe WebSocket errors
       const vite = await createViteServer({
         server: { 
