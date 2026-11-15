@@ -182,28 +182,33 @@ export function buildVectorRAGContext(input: RAGSearchInput): RAGSearchResult {
   const matchingPoetry = queryTokens.length > 0 ? poetryItems.filter(item => item.score >= 0.15) : [];
   const matchingVocab = queryTokens.length > 0 ? scoredVocab.filter(item => item.score >= 0.15) : [];
 
-  // Fallback diverse sample for broad open-ended recommendation/poetry queries
+  const wantsRecommendationsOrLiteraryRefs =
+    /\b(kitap|eser|yazar|roman|oku|okuma|liste|tavsiye|oner|siir|sair|misra|beyit|mufredat|alinti|yillik)\b/i.test(normalizeTr(query));
+
+  // Only include fallback sample items when the user is specifically asking about books/poems/lists
   const effectiveBooks = matchingBooks.length > 0
-    ? matchingBooks.slice(0, 12)
-    : scoredBooks.slice(0, 6);
+    ? matchingBooks.slice(0, 10)
+    : (wantsRecommendationsOrLiteraryRefs ? scoredBooks.slice(0, 5) : []);
 
   const effectivePoetry = matchingPoetry.length > 0
-    ? matchingPoetry.slice(0, 6)
-    : poetryItems.filter((_, idx) => idx % Math.max(1, Math.floor(poetryItems.length / 5)) === 0).slice(0, 5);
+    ? matchingPoetry.slice(0, 5)
+    : (wantsRecommendationsOrLiteraryRefs
+        ? poetryItems.filter((_, idx) => idx % Math.max(1, Math.floor(poetryItems.length / 4)) === 0).slice(0, 4)
+        : []);
 
   const topBooks = effectiveBooks.map(item =>
     `• "${item.book.title}" (${item.book.author}) - Alan: ${item.book.category}${item.book.description ? ` | Konu: ${item.book.description.slice(0, 110)}` : ''}`
   );
 
-  const topQuotes = (matchingQuotes.length > 0 ? matchingQuotes : scoredQuotes.slice(0, 3)).slice(0, 8).map(item =>
+  const topQuotes = (matchingQuotes.length > 0 ? matchingQuotes : []).slice(0, 6).map(item =>
     `• "${item.quote.quoteText}" (${item.quote.bookTitle} - ${item.quote.author})${item.quote.userNote ? ` | Yorum: "${item.quote.userNote}"` : ''}`
   );
 
-  const topReviews = matchingReviews.slice(0, 6).map(item =>
+  const topReviews = matchingReviews.slice(0, 5).map(item =>
     `• "${item.review.bookTitle}" (${item.review.author}): "${item.review.content}"`
   );
 
-  const topCurriculum = matchingCurriculum.slice(0, 8).map(item =>
+  const topCurriculum = matchingCurriculum.slice(0, 6).map(item =>
     `• ${item.yearNum}. Yıl / ${item.monthNum}. Ay: "${item.bookTitle}" (${item.author}) - ${item.category} [${item.description}]`
   );
 
@@ -211,7 +216,7 @@ export function buildVectorRAGContext(input: RAGSearchInput): RAGSearchResult {
     `• ${item.poetName} - "${item.poemTitle}": "${item.contentSnippet.replace(/\n/g, ' / ')}"`
   );
 
-  const topVocab = (matchingVocab.length > 0 ? matchingVocab : scoredVocab.slice(0, 3)).slice(0, 6).map(item =>
+  const topVocab = matchingVocab.slice(0, 5).map(item =>
     `• ${item.vocab.word}: ${item.vocab.meaning}`
   );
 
@@ -221,12 +226,12 @@ export function buildVectorRAGContext(input: RAGSearchInput): RAGSearchResult {
     .map(([cat]) => cat)
     .join(', ');
 
-  // Construct Dense RAG Prompt Context STRICTLY WITHOUT reading progress, page counts, or book status
+  // Construct Dense RAG Prompt Context STRICTLY WITHOUT reading progress, page counts, or forced citations
   const densePromptContext = `
-=== OKUR PROFİLİ VE İLİM ARŞİVİ İLHAM BAĞLAMI ===
+=== OKUR PROFİLİ (İSTEĞE BAĞLI ARKA PLAN) ===
 Hitap Edilecek Okur Adı: ${displayName}
-Öne Çıkan Entelektüel İlgi Alanları: ${interestAreas || 'Felsefe, Edebiyat, Tarih, Tasavvuf, Şiir'}
-(HATIRLATMA: Okurun hangi kitapları şu an okuduğunu, sayfa sayılarını veya okuma yüzdelerini ASLA söyleme; tüm dünya edebiyatından, katalogdan, şiir antolojisinden ve Google arama veritabanından özgürce atıf yap.)
+Öne Çıkan İlgi Alanları: ${interestAreas || 'Felsefe, Edebiyat, Tarih, Tasavvuf, Şiir'}
+(HATIRLATMA: Okurun hangi kitapları şu an okuduğunu, sayfa sayılarını veya okuma yüzdelerini ASLA söyleme. Kitap veya şiir atfı zorunlu değildir; yalnızca konu gerçekten gerektiriyorsa doğal biçimde yararlan, aksi hâlde doğrudan fikre, entelektüel derinliğe ve edebi üsluba odaklan.)
 
 --- İLGİLİ KATALOG VE DÜNYA KLASİKLERİ ---
 ${topBooks.length > 0 ? topBooks.join('\n') : 'Tüm edebiyat, felsefe ve ilim klasikleri açıktır.'}

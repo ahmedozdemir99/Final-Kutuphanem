@@ -1,6 +1,6 @@
 import 'dotenv/config';
 import express from 'express';
-import { GoogleGenAI } from '@google/genai';
+import { GoogleGenAI, ThinkingLevel } from '@google/genai';
 import fs from 'fs';
 import path from 'path';
 import webpush from 'web-push';
@@ -437,10 +437,11 @@ Yanıtını MUTLAKA sadece aşağıdaki JSON formatında ver (ekstra açıklama 
             contents: prompt,
             config: {
               responseMimeType: "application/json",
-              httpOptions: { timeout: 15000, retryOptions: { attempts: 1 } }
+              httpOptions: { timeout: 25000, retryOptions: { attempts: 1 } },
+              ...(m === 'gemini-4-hydrogen' ? { thinkingConfig: { thinkingLevel: ThinkingLevel.LOW } } : {})
             }
           });
-          const timeoutPromise = new Promise<null>((resolve) => setTimeout(() => resolve(null), 15000));
+          const timeoutPromise = new Promise<null>((resolve) => setTimeout(() => resolve(null), 25000));
           const resp = await Promise.race([apiCall, timeoutPromise]);
           if (resp && (resp as any).text) {
             resultText = (resp as any).text;
@@ -513,10 +514,14 @@ Yanıtını MUTLAKA sadece aşağıdaki JSON formatında ver (ekstra açıklama 
       const currentApiKey = process.env.GEMINI_API_KEY || '';
       const currentAi = currentApiKey ? getGenAI() : undefined;
 
-      // Enrich with Google Books live lookup when non-URL mode
-      const googleBooksContext = normalizedMode === 'source'
-        ? ''
-        : await fetchGoogleBooksContext(String(message || ''));
+      // Enrich with Google Books live lookup only when the user query involves books, literature, authors, or reading suggestions
+      const msgStr = String(message || '');
+      const shouldFetchBooks =
+        normalizedMode !== 'source' &&
+        /\b(kitap|eser|yazar|roman|şair|siir|şiir|okuma|müfredat|mufredat|liste|tavsiye|öner|oner|baskı|baski|yayın|yayin|cilt|tercüme|tercume|çeviri|ceviri)\b/i.test(msgStr);
+      const googleBooksContext = shouldFetchBooks
+        ? await fetchGoogleBooksContext(msgStr)
+        : '';
 
       const result = await generateRobiChat(currentAi, {
         message: String(message || ''),
@@ -584,11 +589,12 @@ Lütfen bu aşamaya dair derinlikli, edebi ve felsefi bir "Bölüm & İlerleme A
             contents: prompt,
             config: {
               responseMimeType: "application/json",
-              httpOptions: { timeout: 15000, retryOptions: { attempts: 1 } }
+              httpOptions: { timeout: 25000, retryOptions: { attempts: 1 } },
+              ...(m === 'gemini-4-hydrogen' ? { thinkingConfig: { thinkingLevel: ThinkingLevel.LOW } } : {})
             }
           });
           
-          const timeoutPromise = new Promise<null>((resolve) => setTimeout(() => resolve(null), 15000));
+          const timeoutPromise = new Promise<null>((resolve) => setTimeout(() => resolve(null), 25000));
           const resp = await Promise.race([apiCall, timeoutPromise]);
 
           if (resp && (resp as any).text) {

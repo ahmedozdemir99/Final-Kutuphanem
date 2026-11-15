@@ -429,7 +429,8 @@ export function askRobiBrain(params: RobiContextInput): string {
     'Kültür, Sanat ve Medeniyet': { desc: 'Şehir, mimari, musiki, hat ve medeniyet tefekkürü.', coreAuthors: 'Turgut Cansever, Ekrem Hakkı Ayverdi, Titus Burckhardt', classics: 'İslam’da Şehir ve Mimari, Kubbeyi Yere Koymamak' }
   };
 
-  const matchedPoem = findMatchingPoemFromAnthology(rawMsg);
+  const isPoetryTopic = /\b(şiir|siir|şair|sair|mısra|misra|gazel|beyit|dize|antoloji)\b/i.test(rawMsg);
+  const matchedPoem = isPoetryTopic ? findMatchingPoemFromAnthology(rawMsg) : null;
   const poemParagraph = matchedPoem
     ? `Bu düşünsel ufku şiirin kalbiyle buluşturmak istediğimizde, ${matchedPoem.poet}’nin *"${matchedPoem.title}"* eserindeki şu dizeler zihinde berrak bir yankı uyandırır: *“${matchedPoem.snippet}”*. Şiir, nesrin tahlil ettiği hakikati tek bir sezgide yoğunlaştırarak kelimelere musiki ve ruh kazandırır.`
     : '';
@@ -523,12 +524,12 @@ Belirli bir tema, duygu veya şair üzerinden sana yeni şiirler ve paralel kita
     .filter(Boolean);
 
   const memoryBridge = lastUserTopics.length > 1
-    ? `Önceki sohbetlerimizde üzerinde durduğun düşünce çizgisiyle birlikte değerlendirdiğimizde, "${rawMsg}" sorusu zihnindeki anlam arayışının doğal bir devamı olarak beliriyor.`
-    : `"${rawMsg}" üzerine tefekkür etmek, insanın hem kendi iç dünyasına hem de büyük düşünce mirasına yeni bir pencere aralaması demektir.`;
+    ? `Önceki konuşmalarımızda şekillenen düşünce çizgisiyle birleştiğinde, "${rawMsg}" meselesi yalnızca yüzeyde kalan bir bilgi sorusu değil; insanın varlık, anlam ve sorumluluk idrakini yoklayan esaslı bir tefekkür kapısıdır.`
+    : `"${rawMsg}" sorusu ilk bakışta tek bir noktaya işaret ediyor gibi görünse de, köküne inildiğinde insanın kendisiyle, zamanla ve hakikatle kurduğu bağın tam kalbine dokunur.`;
 
-  return `${userName}, ${memoryBridge} Doğu ile Batı’nın kurucu metinlerine baktığımızda bu tür meselelerin hiçbir zaman tek boyutlu kalmadığını görürüz; İmâm-ı Gazâlî hakikati ahlaki arınma ve kalbî basiretle temellendirirken, Ahmet Hamdi Tanpınar zaman ve estetik hafıza üzerinden insanın iç dünyasını tahlil eder, Dostoyevski ise vicdanın derin çalkantılarını görünür kılar.
+  return `${userName}, ${memoryBridge} İnsan zihni çoğu kez hazır tanımların ve hızla tüketilen yargıların konforuna sığınmak ister; oysa sahici bir kavrayış, kavramın görünen kabuğunu aralayıp ardındaki gerilimi, niyeti ve insanî tecrübeyi sabırla yoklamayı gerektirir.
 
-Bu fikirlerin birbirini besleyen yönü, bilginin kuru bir malumat yığını olmaktan çıkıp şahsiyeti inşa eden canlı bir hikmete dönüşmesidir. Örneğin tarih ve toplum cephesinden bakmak istediğimizde İbn Haldun’un *Mukaddime*si medeniyetlerin ruhunu çözümlerken, Cemil Meriç’in *Bu Ülke*si kelimeler ve idrak arasındaki bağı hatırlatır.
+Bir meseleyi derinleştiren asıl unsur, dışarıdan eklenen süslü ifadeler değil; fikrin kendi iç tutarlılığı, ruhu dönüştüren samimiyeti ve günlük hayatın somut kararlarına sirayet edebilen diriliğidir. Bu açıdan bakıldığında, üzerinde durduğun bu başlık hem içsel bir muhasebe hem de berrak bir akıl yürütme için verimli bir zemin sunar.
 
-${poemParagraph} İstersen bu konuyu dünya edebiyatından belirli bir eserle veya Google arşivindeki özgün kaynaklarla daha da somutlaştırıp sana özel bir okuma seçkisi hazırlayabilirim; hangi yöne doğru derinleşmek istersin?`;
+Dilersen bu konunun felsefi, psikolojik yahut ahlaki cephesinden hangisini daha yakından açmak istediğini söyle; düşünceni adım adım birlikte derinleştirelim.`;
 }
