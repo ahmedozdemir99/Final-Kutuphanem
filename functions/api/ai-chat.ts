@@ -39,7 +39,7 @@ export const onRequestPost = async ({ request, env }: { request: Request; env: E
     }
     const models: string[] = (Array.isArray(discovered?.models) ? discovered.models : [])
       .filter((item: any) => Array.isArray(item.supportedGenerationMethods) && item.supportedGenerationMethods.includes('generateContent'))
-      .map((item: any) => String(item.name || '').replace(/^models\\//, ''))
+      .map((item: any) => String(item.name || '').replace('models/', ''))
       .filter((name: string) => name.startsWith('gemini-') && !name.includes('embedding') && !name.includes('image') && !name.includes('tts'))
       .sort((a: string, b: string) => {
         const rank = (name: string) => name.includes('flash-lite') ? 0 : name.includes('flash') ? 1 : 2;
