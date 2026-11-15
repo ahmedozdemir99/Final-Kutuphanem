@@ -1720,7 +1720,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         await Promise.all(chunk.map(op => safeFirestoreSet(op.ref, op.data)));
       }
 
-      localStorage.setItem('dk_last_sync_time', String(nowMs));
+      localStorage.setItem('dk_last_sync_time', String(Date.now()));
       onProgress?.(100);
       setCloudSyncStatus('synced');
       return { 
@@ -1737,7 +1737,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       setCloudSyncStatus('error');
       return {
         success: false,
-        message: 'Bulut eşitlemesi başarısız. Yerel verilerinizi ve JSON yedeğinizi koruyun.'
+        message: `Bulut eşitlemesi başarısız (${err?.code || 'bilinmeyen hata'}): ${err?.message || 'Bağlantıyı ve Firebase kurallarını kontrol edin.'} Yerel verilerinizi ve JSON yedeğinizi koruyun.`
       };
     } finally {
       isSyncingRef.current = false;
