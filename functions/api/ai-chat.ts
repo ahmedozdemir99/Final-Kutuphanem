@@ -28,8 +28,24 @@ export const onRequestPost = async ({ request, env }: { request: Request; env: E
       contents,
       generationConfig: { maxOutputTokens: 1400, temperature: 0.7 }
     });
-    // Model availability can vary by project. Retry only if the model is unavailable.
-    const models = ['gemini-2.5-flash', 'gemini-2.5-flash-lite', 'gemini-2.0-flash'];
+    // Discover models actually available to this key instead of guessing model IDs.
+    const discovery = await fetch('https://generativelanguage.googleapis.com/v1beta/models?pageSize=100', {
+      headers: { 'x-goog-api-key': env.GEMINI_API_KEY! }
+    });
+    const discovered: any = await discovery.json().catch(() => null);
+    if (!discovery.ok) {
+      console.error('Gemini model discovery failed', discovery.status, discovered?.error?.status);
+      return json({ error: 'Gemini model listesi alınamadı (' + discovery.status + '). Google API durumu: ' + String(discovered?.error?.status || 'bilinmiyor') + '.' }, 502);
+    }
+    const models: string[] = (Array.isArray(discovered?.models) ? discovered.models : [])
+      .filter((item: any) => Array.isArray(item.supportedGenerationMethods) && item.supportedGenerationMethods.includes('generateContent'))
+      .map((item: any) => String(item.name || '').replace(/^models\\//, ''))
+      .filter((name: string) => name.startsWith('gemini-') && !name.includes('embedding') && !name.includes('image') && !name.includes('tts'))
+      .sort((a: string, b: string) => {
+        const rank = (name: string) => name.includes('flash-lite') ? 0 : name.includes('flash') ? 1 : 2;
+        return rank(a) - rank(b);
+      }).slice(0, 5);
+    if (!models.length) return json({ error: 'Bu Google API anahtarı için generateContent destekleyen Gemini modeli listelenmiyor. Generative Language API erişimini kontrol edin.' }, 502);
     for (const model of models) {
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), 20000);
@@ -60,7 +76,7 @@ export const onRequestPost = async ({ request, env }: { request: Request; env: E
       if (!reply) return json({ error: 'Yapay zekâdan boş yanıt alındı.' }, 502);
       return json({ reply });
     }
-    return json({ error: 'Gemini modelleri bu API anahtarıyla kullanılamıyor (404). Google AI Studio model erişimini kontrol edin.' }, 502);
+    return json({ error: 'Google tarafından listelenen modeller de 404 döndürdü. API yapılandırmasını ve Cloudflare anahtarını kontrol edin.' }, 502);
   } catch (error) {
     console.error('AI function error', error);
     return json({ error: 'Yapay zekâ bağlantısı zaman aşımına uğradı veya kesildi.' }, 504);
