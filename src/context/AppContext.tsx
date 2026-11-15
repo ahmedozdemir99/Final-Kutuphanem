@@ -1661,7 +1661,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       onProgress?.(30);
 
       const cleanBooks = mergeAndDeduplicateBooksList(userBooks);
-      setUserBooks(cleanBooks);
 
       // Pre-process cover images asynchronously BEFORE creating write batches
       const preparedBooks = await Promise.all(
