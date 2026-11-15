@@ -388,31 +388,31 @@ export const ChatView: React.FC = () => {
     setIsLoading(true);
 
     try {
-      // 1. Perform client-side Vector RAG Search over all user data, 1920-book curriculum, notes, and 256 poems
-      const ragResult = buildVectorRAGContext({
-        query: text.trim(),
-        userBooks,
-        readingSessions,
-        quotations,
-        reviews,
-        vocabulary,
-        curriculum: FULL_FOUR_YEAR_CURRICULUM,
-        poetry: fullPoetryCollection,
-        displayName: userProfile.displayName,
-        dailyTargetPages: userProfile.dailyTargetPages
-      });
-
-      // Update source highlights for UI indicator only if genuine query matches were retrieved
-      const activeSources = [
-        ...ragResult.retrievedBooks.slice(0, 2),
-        ...ragResult.retrievedQuotes.slice(0, 2),
-        ...ragResult.retrievedCurriculum.slice(0, 2)
-      ];
+      // Avoid expensive full-library search for greetings and unrelated questions.
+      const queryText = text.trim();
+      const needsLibraryContext = /kitap|kütüphan|okuma|şiir|alıntı|yazar|eser|müfredat|kategori|arşiv|notlarım|inceleme|kelime|planım/i.test(queryText);
+      let densePromptContext = '';
+      let activeSources: string[] = [];
+      if (needsLibraryContext) {
+        const ragResult = buildVectorRAGContext({
+          query: queryText,
+          userBooks, readingSessions, quotations, reviews, vocabulary,
+          curriculum: FULL_FOUR_YEAR_CURRICULUM,
+          poetry: fullPoetryCollection,
+          displayName: userProfile.displayName,
+          dailyTargetPages: userProfile.dailyTargetPages
+        });
+        densePromptContext = ragResult.densePromptContext.slice(0, 10000);
+        activeSources = [
+          ...ragResult.retrievedBooks.slice(0, 2),
+          ...ragResult.retrievedQuotes.slice(0, 2),
+          ...ragResult.retrievedCurriculum.slice(0, 2)
+        ];
+      }
       setLastRagSources(activeSources);
-
-      const history = [...messages, userMsg].map(m => ({
+      const history = [...messages.slice(-8), userMsg].map(m => ({
         role: m.role,
-        parts: [{ text: m.text }]
+        parts: [{ text: m.text.slice(0, 2000) }]
       }));
 
       const res = await fetch('/api/ai-chat', {
@@ -421,8 +421,7 @@ export const ChatView: React.FC = () => {
         body: JSON.stringify({
           message: text.trim(),
           history,
-          densePromptContext: ragResult.densePromptContext,
-          userSummary: ragResult.summary
+          densePromptContext
         })
       });
 
@@ -449,14 +448,16 @@ export const ChatView: React.FC = () => {
       
       setMessages(prev => [...prev, modelMsg]);
 
-      // Save user and model messages to Firestore
+      // Never block the chat response on Firestore network writes.
       if (auth.currentUser) {
-        await addDoc(collection(db, 'chatMessages'), { ...userMsg, userId: auth.currentUser.uid, createdAt: new Date().toISOString() });
-        await addDoc(collection(db, 'chatMessages'), { ...modelMsg, userId: auth.currentUser.uid, createdAt: new Date().toISOString() });
-        
-        // Update LocalStorage cache
-        const updatedHistory = [...messages, userMsg, modelMsg];
-        localStorage.setItem(`chat_history_${auth.currentUser.uid}`, JSON.stringify(updatedHistory));
+        const uid = auth.currentUser.uid;
+        try {
+          localStorage.setItem(`chat_history_${uid}`, JSON.stringify([...messages, userMsg, modelMsg].slice(-100)));
+        } catch (error) { console.warn('Chat cache write skipped:', error); }
+        void Promise.all([
+          addDoc(collection(db, 'chatMessages'), { ...userMsg, userId: uid, createdAt: new Date().toISOString() }),
+          addDoc(collection(db, 'chatMessages'), { ...modelMsg, userId: uid, createdAt: new Date().toISOString() })
+        ]).catch(error => console.warn('Chat history cloud save failed:', error));
       }
 
       // Eğer Eller Serbest Modu açıksa, Robi cevabı otomatik olarak seslendirir!
