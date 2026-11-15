@@ -1712,12 +1712,26 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
       onProgress?.(80);
 
-      // Safely write all documents resiliently in parallel chunks using safeFirestoreSet
-      // Reduced chunk size for safer quota usage
-      const chunkSize = 10;
-      for (let i = 0; i < allOps.length; i += chunkSize) {
-        const chunk = allOps.slice(i, i + chunkSize);
-        await Promise.all(chunk.map(op => safeFirestoreSet(op.ref, op.data)));
+      // A disconnected Firestore client may queue writes indefinitely. Bound the UI wait
+      // without claiming the queued writes were cancelled or successfully uploaded.
+      const uploadAll = async () => {
+        const chunkSize = 10;
+        for (let i = 0; i < allOps.length; i += chunkSize) {
+          const chunk = allOps.slice(i, i + chunkSize);
+          await Promise.all(chunk.map(op => safeFirestoreSet(op.ref, op.data)));
+          onProgress?.(80 + Math.round(18 * (i + chunk.length) / Math.max(1, allOps.length)));
+        }
+      };
+      let uploadTimer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        await Promise.race([
+          uploadAll(),
+          new Promise<never>((_, reject) => {
+            uploadTimer = setTimeout(() => reject(new Error('Bulut yanıtı 60 saniye içinde gelmedi. Bağlantıyı ve Firestore izinlerini kontrol edin; bekleyen yazmalar devam edebilir.')), 60000);
+          })
+        ]);
+      } finally {
+        if (uploadTimer !== undefined) clearTimeout(uploadTimer);
       }
 
       localStorage.setItem('dk_last_sync_time', String(Date.now()));
@@ -1745,18 +1759,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
 
-  // Debounced cloud backup only after a successful read of the signed-in user's data.
-  // The explicit sync function remains available for immediate backup and error reporting.
-  useEffect(() => {
-    if (!isHydrated || !cloudRestoreReady || !currentUser || currentUser.isAnonymous) return;
-    if (!navigator.onLine) return;
-    const timer = window.setTimeout(() => {
-      syncAllDataToCloud().then(result => {
-        if (!result.success) console.warn('Otomatik bulut yedeği:', result.message);
-      }).catch(error => console.warn('Otomatik bulut yedeği başarısız:', error));
-    }, 15000);
-    return () => window.clearTimeout(timer);
-  }, [isHydrated, cloudRestoreReady, currentUser?.uid, userBooks, readingSessions, reviews, quotations, vocabulary, quranProgress]);
+  // Do not start a full-library upload automatically. Users can initiate a backup
+  // explicitly after reviewing their local data and JSON export.
 
   const verifyDataIntegrity = () => {
     return {
