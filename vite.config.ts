@@ -25,33 +25,33 @@ export default defineConfig(() => {
           start_url: '/?source=pwa',
           scope: '/',
           icons: [
-            { src: '/final-kutuphanem-icon.svg', sizes: 'any', type: 'image/svg+xml', purpose: 'any' },
+            { src: '/final-kutuphanem-icon.svg?v=20261115', sizes: 'any', type: 'image/svg+xml', purpose: 'any' },
             {
-              src: '/icon-192.png',
+              src: '/icon-192.png?v=20261115',
               sizes: '192x192',
               type: 'image/png',
               purpose: 'any',
             },
             {
-              src: '/icon-512.png',
+              src: '/icon-512.png?v=20261115',
               sizes: '512x512',
               type: 'image/png',
               purpose: 'any',
             },
             {
-              src: '/icon-192.png',
+              src: '/icon-192.png?v=20261115',
               sizes: '192x192',
               type: 'image/png',
               purpose: 'maskable',
             },
             {
-              src: '/icon-512.png',
+              src: '/icon-512.png?v=20261115',
               sizes: '512x512',
               type: 'image/png',
               purpose: 'maskable',
             },
             {
-              src: '/icon.png',
+              src: '/icon.png?v=20261115',
               sizes: '1024x1024',
               type: 'image/png',
               purpose: 'maskable',
@@ -63,21 +63,21 @@ export default defineConfig(() => {
               short_name: 'Widget',
               description: 'Günün Vecizesi & Canlı Okuma Takip Widgetı',
               url: '/?widget=true',
-              icons: [{ src: '/icon-192.png', sizes: '192x192' }]
+              icons: [{ src: '/icon-192.png?v=20261115', sizes: '192x192' }]
             },
             {
               name: 'Günün Vecizesi & Hikmeti',
               short_name: 'Günün Vecizesi',
               description: 'Günün vecizesi ve hikmetli sözü',
               url: '/?tab=today&action=wisdom',
-              icons: [{ src: '/icon-192.png', sizes: '192x192' }]
+              icons: [{ src: '/icon-192.png?v=20261115', sizes: '192x192' }]
             },
             {
               name: 'Kur\'an-ı Kerim',
               short_name: 'Kur\'an-ı Kerim',
               description: 'Kur\'an-ı Kerim okuma ve dinleme',
               url: '/?tab=explore&sub=quran',
-              icons: [{ src: '/icon-192.png', sizes: '192x192' }]
+              icons: [{ src: '/icon-192.png?v=20261115', sizes: '192x192' }]
             }
           ],
           widgets: [
@@ -89,7 +89,7 @@ export default defineConfig(() => {
               template: "reading-widget",
               data: "/?widget=true",
               type: "text/html",
-              icons: [{ src: "/icon-192.png", sizes: "192x192" }]
+              icons: [{ src: "/icon-192.png?v=20261115", sizes: "192x192" }]
             }
           ]
         } as any,
