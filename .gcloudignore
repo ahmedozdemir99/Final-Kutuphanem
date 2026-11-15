@@ -1,0 +1,17 @@
+node_modules/
+dist/
+.aistudio/
+.git/
+*.log
+.env
+.env.*
+!.env.example
+android-widget/
+all_reciters.txt
+reciters_list.txt
+qurancom_reciters.txt
+inspect_kwgt.js
+inspect_kwgt_full.js
+build_native_widget_files.js
+create_zip.js
+push_subscriptions.json
